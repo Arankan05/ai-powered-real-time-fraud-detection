@@ -9,6 +9,7 @@ import {
 import type { DashboardResponse } from '@/types/dashboard'
 import * as analyticsApi from '@/services/api/analyticsApi'
 import StatCard from '@/components/analyst/StatCard'
+import RiskDistributionChart from '@/components/analyst/RiskDistributionChart'
 import { Button } from '@/components/ui/button'
 
 function DashboardPage() {
@@ -80,30 +81,37 @@ function DashboardPage() {
         </div>
       )}
 
-      {/* Statistics */}
+      {/* Statistics + Risk Distribution */}
       {dashboard && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <StatCard
-            title="Total Transactions"
-            value={dashboard.total_transactions}
-            icon={Activity}
+        <>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard
+              title="Total Transactions"
+              value={dashboard.total_transactions}
+              icon={Activity}
+            />
+            <StatCard
+              title="Flagged Transactions"
+              value={dashboard.flagged_transactions}
+              icon={ShieldAlert}
+            />
+            <StatCard
+              title="Open Alerts"
+              value={dashboard.alerts_open}
+              icon={AlertTriangle}
+            />
+            <StatCard
+              title="Resolved Alerts"
+              value={dashboard.alerts_resolved}
+              icon={CheckCircle}
+            />
+          </div>
+
+          {/* Risk Distribution */}
+          <RiskDistributionChart
+            riskDistribution={dashboard.risk_distribution}
           />
-          <StatCard
-            title="Flagged Transactions"
-            value={dashboard.flagged_transactions}
-            icon={ShieldAlert}
-          />
-          <StatCard
-            title="Open Alerts"
-            value={dashboard.alerts_open}
-            icon={AlertTriangle}
-          />
-          <StatCard
-            title="Resolved Alerts"
-            value={dashboard.alerts_resolved}
-            icon={CheckCircle}
-          />
-        </div>
+        </>
       )}
     </div>
   )
