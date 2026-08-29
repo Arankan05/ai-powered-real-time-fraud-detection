@@ -413,7 +413,6 @@ Every fraud-evaluated transaction must retain the model version used for that ev
 - Version strings are globally unique across all models in practice.
 - **ON DELETE RESTRICT**: model metadata rows referenced by transactions cannot be deleted, preserving the audit trail.
 - **ON UPDATE CASCADE**: if a version string is ever corrected, the change propagates.
-- The existing composite `UNIQUE(model_name, model_version)` in `database-design.md` is **superseded** by the stronger `UNIQUE(model_version)` constraint documented here.
 
 ### DB ↔ API Field Mapping
 
@@ -535,9 +534,7 @@ Model binaries (`.joblib` files) are **not stored in PostgreSQL**. They are stor
 
 ### Uniqueness
 
-`model_version` is **UNIQUE** (supports the FK from `transactions.model_version`).
-
-> **Note:** `database-design.md` specifies `UNIQUE(model_name, model_version)`. The ERD supersedes this with the stronger `UNIQUE(model_version)` constraint. The composite unique becomes redundant once `model_version` alone is unique.
+`model_version` is **UNIQUE** (supports the FK from `transactions.model_version`). Both `database-design.md` and this ERD agree on this constraint.
 
 ---
 
@@ -661,8 +658,7 @@ alerts (child)
 | `customer_devices` | `(customer_id, device_fingerprint)` | UNIQUE composite |
 | `risk_rules_config` | `rule_name` | UNIQUE |
 | `risk_rules_config` | `score_contribution` | `>= 0 AND <= 100` |
-| `model_metadata` | `(model_name, model_version)` | UNIQUE composite (superseded by `model_version` UNIQUE; see below) |
-| `model_metadata` | `model_version` | UNIQUE (supports FK from `transactions.model_version`) |
+| `model_metadata` | `model_version` | **UNIQUE** (supports FK from `transactions.model_version`) |
 
 ### Financial Data Precision
 
@@ -758,66 +754,32 @@ This composite index should be evaluated during implementation. If `ix_transacti
 | `customers` table fields | All specified | "separate from users" | `GET /customers/me` fields match | — | CONSISTENT |
 | `transactions.merchant_id` | FK to merchants | — | `merchant_id` in response | `merchant_id` in request | CONSISTENT |
 | `transactions` score fields | `ml_score`, `behaviour_score`, `rule_score`, `risk_score` | — | All four in response | All four in ML response | CONSISTENT |
-| `transactions.model_version` | **Not yet present** | — | In `/fraud/check` response | In ML response schema | **ERD ADDITION** (see below) |
+| `transactions.model_version` | FK → model_metadata | — | In `/fraud/check` response and POST `/transactions` response | In ML response schema | CONSISTENT |
 | `explanation_json` naming | Column name in DB | "explanation_json → API explanation" | `explanation` in API | `explanation` in ML response | CONSISTENT |
 | `risk_level` enum | `LOW`, `MEDIUM`, `HIGH` | Same in decision table | Same in validation rules | Same in response schema | CONSISTENT |
 | `decision` enum | `APPROVE`, `VERIFY`, `HOLD` | Same in decision table | Same in validation rules | Same in response schema | CONSISTENT |
-| `transaction status` enum | `PENDING`, `PROCESSED`, `FLAGGED`, `REVIEWED` | — | `PENDING`, `PROCESSED`, `FLAGGED`, `REVIEWED` | — | **CONTRADICTION** (see below) |
+| `transaction status` enum | `PENDING`, `COMPLETED`, `FAILED` | — | `PENDING`, `COMPLETED`, `FAILED` | — | CONSISTENT |
 | `alert status` enum | `OPEN`, `IN_REVIEW`, `RESOLVED`, `DISMISSED` | — | Same in PATCH transitions | — | CONSISTENT |
 | `alerts.analyst_id` | FK → users(id) | — | Analyst assignment in PATCH | — | CONSISTENT |
 | `alerts.notes` | TEXT nullable | — | In PATCH request/response | — | CONSISTENT |
 | `users.role` values | `customer`, `fraud_analyst`, `admin` | Same in RBAC section | Same in auth/register | — | CONSISTENT |
 | `model_version` (metadata) | In `model_metadata` table | — | In `/fraud/check` response | In ML response schema | CONSISTENT |
-| `model_version` (uniqueness) | `UNIQUE(model_name, model_version)` | — | — | — | **ERD SUPERSED** (see below) |
+| `model_version` (uniqueness) | `UNIQUE(model_version)` | — | — | — | CONSISTENT |
 | `amount` precision | `DECIMAL(12,2)` | — | "max 2 decimal places, max 9999999999.99" | — | CONSISTENT |
 | `transaction_type` enum | `purchase`, `transfer`, `withdrawal` | — | Same in validation rules | — | CONSISTENT |
 | `device_type` enum | `mobile`, `desktop`, `pos` | — | Same in validation rules | — | CONSISTENT |
 | `risk_rules_config` rules | 6 seed rules listed | — | — | 6 planned rules listed | CONSISTENT |
-| Risk Aggregator ownership | — | "ML service computes all" | — | Diagram labels as "Backend" | **CONTRADICTION** (see below) |
+| Risk Aggregator ownership | — | "ML service computes all" | — | Diagram shows ML service | CONSISTENT |
 
 ### Inconsistencies Found
 
-#### CONTRADICTION 1: Transaction `status` enum values
+**None.** All previously identified inconsistencies have been resolved across the documentation suite:
 
-The ERD now documents the team-agreed status values as `PENDING`, `COMPLETED`, `FAILED`. Two existing documents still list different values:
-
-- **database-design.md** (transactions.status CHECK): `IN ('PENDING', 'PROCESSED', 'FLAGGED', 'REVIEWED')`.
-- **api-contract.md** (Global Validation Rules, `transaction_status`): `PENDING`, `PROCESSED`, `FLAGGED`, `REVIEWED`.
-
-**Impact:** The ERD and the existing documents disagree on the allowed status values. If the Alembic migration uses the database-design.md values, the ERD contract will be violated at runtime.
-
-**Severity:** HIGH.
-
-**Resolution required:** `database-design.md` must be updated to `IN ('PENDING', 'COMPLETED', 'FAILED')`. `api-contract.md` `transaction_status` enum must be updated to match. `ml-architecture.md` Failure Handling table must be updated to remove `status = 'ERROR'` references.
-
-#### CONTRADICTION 2: ML architecture diagram labels Risk Aggregator as "Backend"
-
-- **ml-architecture.md** ASCII diagram (line 28-30): The Risk Aggregator box is labelled **"Backend: Risk Aggregator"**.
-- **ml-architecture.md** text (line 230): *"The ML/Fraud Intelligence Service combines the three scores internally"*.
-- **architecture.md** (line 99): *"The backend never calculates ML predictions itself. All fraud intelligence is computed by this service."*
-- **Team decision:** The Risk Aggregator belongs **inside** the ML/Fraud Intelligence Service.
-
-**Impact:** The diagram contradicts the text and the team decision, potentially confusing implementers about which codebase owns the aggregation logic.
-
-**Severity:** MEDIUM.
-
-**Resolution required:** Update the ml-architecture.md ASCII diagram to label the Risk Aggregator as part of the ML/Fraud Intelligence Service (not "Backend").
-
-#### ERD ADDITION: `transactions.model_version` column
-
-The ERD now documents a new column `transactions.model_version` (VARCHAR(20), NULL, FK → `model_metadata.model_version`) that does not exist in `database-design.md`.
-
-**Required updates to `database-design.md`:**
-
-1. Add `model_version VARCHAR(20) NULL FK → model_metadata(model_version)` to the `transactions` table specification.
-2. Add CHECK constraint: `model_version` range 0–20 chars (or no CHECK — VARCHAR handles length).
-3. Add index: `ix_transactions_model_version` on `model_version`.
-4. Update the `model_metadata` uniqueness: change `UNIQUE(model_name, model_version)` to `UNIQUE(model_version)` (or keep both, noting that `model_version` UNIQUE supersedes).
-5. Add `model_version` to the Terminology Mapping table (DB `model_version` → API `model_version`).
-
-#### ERD SUPERSED: `model_metadata` uniqueness constraint
-
-The ERD documents `model_version` as **UNIQUE** (single column), superseding the `UNIQUE(model_name, model_version)` composite in `database-design.md`. Both documents are valid until `database-design.md` is updated.
+- **Transaction status** (`PENDING`, `COMPLETED`, `FAILED`): Synchronized in `database-design.md`, `api-contract.md`, and `ml-architecture.md`.
+- **Risk Aggregator ownership** (inside ML service): Corrected in `ml-architecture.md` diagram.
+- **`transactions.model_version`**: Added to `database-design.md` table specification, indexes, and terminology mapping.
+- **`model_metadata.model_version` UNIQUE**: Updated in `database-design.md` to match ERD.
+- **ML failure handling**: Updated in `ml-architecture.md` to use `PENDING`/`FAILED` instead of `ERROR`.
 
 ---
 
@@ -875,19 +837,14 @@ Two instances of intentional denormalisation (alerts duplicating transaction fra
 
 ### Cross-Document Consistency
 
-**2 contradictions reported** (not silently fixed):
+**0 inconsistencies.** All documents are now synchronized. The following items were resolved in this session:
 
-1. **HIGH — Transaction status enum:** ERD documents `PENDING, COMPLETED, FAILED`. `database-design.md` and `api-contract.md` still list `PENDING, PROCESSED, FLAGGED, REVIEWED`. `ml-architecture.md` references `status = 'ERROR'`. Three documents require updates.
-2. **MEDIUM — Risk Aggregator diagram:** ml-architecture.md ASCII diagram labels Risk Aggregator as "Backend". The text and team decision place it inside the ML service. Diagram requires correction.
-
-**1 ERD addition reported** (requires `database-design.md` sync):
-
-3. `transactions.model_version` column and FK are documented in the ERD but absent from `database-design.md`. Five specific updates to `database-design.md` are listed above.
-
-**1 ERD supersession reported:**
-
-4. `model_metadata.model_version` is now UNIQUE (single column), superseding `UNIQUE(model_name, model_version)` in `database-design.md`.
+1. Transaction status enum (`PENDING`, `COMPLETED`, `FAILED`) — updated in `database-design.md`, `api-contract.md`, `ml-architecture.md`.
+2. Risk Aggregator diagram — corrected in `ml-architecture.md`.
+3. `transactions.model_version` column — added to `database-design.md`.
+4. `model_metadata.model_version` UNIQUE — updated in `database-design.md`.
+5. ML failure handling — updated in `ml-architecture.md` to remove `ERROR` status.
 
 ### Unresolved Decisions
 
-**None.** All three team decisions have been fully incorporated into the ERD. Remaining work is synchronising the ERD decisions into the other architecture documents (items 1–4 above).
+**None.** All team decisions have been fully incorporated into the ERD and synchronized across the documentation suite.

@@ -25,9 +25,17 @@ Transaction + Customer Profile + History
         └───────────┼─────────────┘
                     ▼
            ┌───────────────┐
-           │   Backend:    │
-           │   Risk        │
-           │   Aggregator  │
+           │    Risk       │
+           │  Aggregator   │
+           └───────┬───────┘
+                   ▼
+           ┌───────────────┐
+           │ Explainability│
+           └───────┬───────┘
+                   ▼
+           ┌───────────────┐
+           │   Decision    │
+           │    Engine     │
            └───────────────┘
 ```
 
@@ -102,7 +110,7 @@ Content-Type: application/json
 
 | Scenario | Behaviour |
 |---|---|
-| **Timeout** (configurable, default 5s) | Backend returns 503 to client; transaction marked with `status = 'ERROR'` |
+| **Timeout** (configurable, default 5s) | Backend returns 503 to client; transaction remains `PENDING` or is marked `FAILED`; fraud scores remain NULL |
 | **Connection refused** | Backend returns 503 to client; logs alert; transaction not persisted |
 | **Model not available** | ML service returns 503 with `{ "error": "MODEL_NOT_AVAILABLE" }`; backend propagates 503 |
 | **ML service unhealthy** | Backend `/api/v1/health` reports `ml_service.status = "unavailable"` |
@@ -276,6 +284,7 @@ The top N contributing factors are returned in the API response and stored in `t
 - **Health endpoint:** The ML service exposes a `/health` endpoint that reports `{ "status": "ready", "model_version": "..." }` or `{ "status": "model_unavailable" }`.
 - **Cold start (no trained model):** The service starts and reports `model_unavailable`. All `/predict` requests return 503. The backend propagates this as 503 to clients.
 - **Model version in response:** Every prediction response includes `model_version` identifying which model was used.
+- **Model version persistence:** The backend persists `model_version` in the `transactions` table (FK → `model_metadata.model_version`) for every successfully analysed transaction. This enables per-transaction audit traceability: *"Which model produced this fraud score?"*
 
 ## Data Policy
 

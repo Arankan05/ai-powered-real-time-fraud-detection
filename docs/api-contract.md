@@ -25,7 +25,7 @@ RESTful JSON API. **Base URL:** `/api/v1`. All endpoints require a valid JWT bea
 | `per_page` | Integer 1–100, default 20 |
 | `risk_level` | Enum: `LOW`, `MEDIUM`, `HIGH` |
 | `alert_status` | Enum: `OPEN`, `IN_REVIEW`, `RESOLVED`, `DISMISSED` |
-| `transaction_status` | Enum: `PENDING`, `PROCESSED`, `FLAGGED`, `REVIEWED` |
+| `transaction_status` | Enum: `PENDING`, `COMPLETED`, `FAILED` (lifecycle only; fraud outcome is in `decision`/`risk_level`) |
 
 ---
 
@@ -189,7 +189,7 @@ The frontend calls only this endpoint. It must not separately call `POST /api/v1
   "device_type": "mobile",
   "ip_address": "192.168.1.100",
   "timestamp": "2026-08-29T14:30:00Z",
-  "status": "PROCESSED",
+  "status": "COMPLETED",
   "ml_score": 35,
   "behaviour_score": 52,
   "rule_score": 15,
@@ -214,6 +214,7 @@ The frontend calls only this endpoint. It must not separately call `POST /api/v1
     "is_new_device",
     "new_device_high_amount"
   ],
+  "model_version": "fraud-xgb-v1.2.0",
   "alert": null
 }
 ```
@@ -260,7 +261,7 @@ When the decision is HOLD (risk_level = HIGH), the `alert` field contains:
       "currency": "USD",
       "transaction_type": "purchase",
       "timestamp": "2026-08-29T14:30:00Z",
-      "status": "PROCESSED",
+      "status": "COMPLETED",
       "risk_score": 45,
       "risk_level": "MEDIUM",
       "decision": "VERIFY"
@@ -280,7 +281,7 @@ When the decision is HOLD (risk_level = HIGH), the `alert` field contains:
 
 **Auth required.** Customers see own only. Analysts/admins see any.
 
-**Response (200):** Same full structure as `POST /api/v1/transactions` response (including `ml_score`, `behaviour_score`, `rule_score`, `explanation`, `risk_factors`, `alert`).
+**Response (200):** Same full structure as `POST /api/v1/transactions` response (including `ml_score`, `behaviour_score`, `rule_score`, `explanation`, `risk_factors`, `model_version`, `alert`).
 
 **Errors:** 401, 403, 404.
 

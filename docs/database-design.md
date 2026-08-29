@@ -31,7 +31,7 @@ No real banking or customer data is ever stored. All data is synthetic or derive
 ┌──────────────┐       │ behaviour_score   │       ┌──────────────┐
 │  customers   │       │ rule_score        │       │   audit_logs │
 │──────────────│       │ explanation_json  │       │──────────────│
-│ id (PK)      │◀──┐   │ status            │       │ id (PK)      │
+│ id (PK)      │◀──┐   │ model_version(FK) │       │ id (PK)      │
 │ first_name   │   │   │ created_at        │       │ actor_id     │
 │ last_name    │   │   └───────────────────┘       │ (FK→users)   │
 │ phone        │   │                               │ action       │
@@ -161,7 +161,9 @@ Every transaction submitted through the system, including fraud analysis results
 | `device_type` | VARCHAR(20) | YES | NULL | | | | IN ('mobile','desktop','pos') |
 | `ip_address` | VARCHAR(45) | YES | NULL | | | | |
 | `timestamp` | TIMESTAMPTZ | NO | NOW() | | | | |
-| `status` | VARCHAR(20) | NO | `'PENDING'` | | | | IN ('PENDING','PROCESSED','FLAGGED','REVIEWED') |
+| `status` | VARCHAR(20) | NO | `'PENDING'` | | | | IN ('PENDING','COMPLETED','FAILED') |
+
+> **Status semantics:** `status` represents the **transaction lifecycle only** (PENDING → COMPLETED or FAILED). Fraud outcomes are captured separately in `risk_score`, `risk_level`, and `decision`. COMPLETED ≠ APPROVED; FAILED ≠ REJECTED. See `docs/database-erd.md` for the full Transaction Status vs Fraud Analysis Status specification.
 | `risk_score` | INTEGER | YES | NULL | | | | 0–100 |
 | `risk_level` | VARCHAR(10) | YES | NULL | | | | IN ('LOW','MEDIUM','HIGH') |
 | `decision` | VARCHAR(10) | YES | NULL | | | | IN ('APPROVE','VERIFY','HOLD') |
@@ -169,6 +171,7 @@ Every transaction submitted through the system, including fraud analysis results
 | `behaviour_score` | INTEGER | YES | NULL | | | | 0–100 |
 | `rule_score` | INTEGER | YES | NULL | | | | 0–100 |
 | `explanation_json` | JSONB | YES | NULL | | | | |
+| `model_version` | VARCHAR(20) | YES | NULL | | **→ model_metadata(model_version)** | | |
 | `created_at` | TIMESTAMPTZ | NO | NOW() | | | | |
 
 **Indexes:**
@@ -177,6 +180,7 @@ Every transaction submitted through the system, including fraud analysis results
 - `ix_transactions_timestamp` — on `timestamp` (time-range queries, velocity checks)
 - `ix_transactions_status` — on `status` (filter by state)
 - `ix_transactions_risk_level` — on `risk_level` (filter by risk)
+- `ix_transactions_model_version` — on `model_version` (audit: which model scored this transaction)
 
 ---
 
@@ -255,7 +259,7 @@ Tracks trained ML models for reproducibility and versioning.
 |---|---|---|---|---|---|---|---|
 | `id` | UUID | NO | gen_random_uuid() | **PK** | | | |
 | `model_name` | VARCHAR(100) | NO | | | | | |
-| `model_version` | VARCHAR(20) | NO | | | | | |
+| `model_version` | VARCHAR(20) | NO | | | | **UNIQUE** | |
 | `framework` | VARCHAR(50) | NO | | | | | |
 | `artifact_path` | VARCHAR(500) | NO | | | | | |
 | `training_metrics` | JSONB | YES | NULL | | | | |
@@ -264,7 +268,7 @@ Tracks trained ML models for reproducibility and versioning.
 | `trained_by` | UUID | YES | NULL | | **→ users(id)** | | |
 
 **Indexes:**
-- `ix_model_metadata_name_version` — UNIQUE on (`model_name`, `model_version`)
+- `ix_model_metadata_version` — UNIQUE on `model_version` (supports FK from `transactions.model_version`)
 
 ---
 
@@ -310,6 +314,7 @@ Persistent configuration for rule-based risk scoring. Rules are evaluated by the
 | `ml_score` | `ml_score` | ML model fraud probability (0–100) |
 | `behaviour_score` | `behaviour_score` | Behavioural anomaly score (0–100) |
 | `rule_score` | `rule_score` | Rule-based cumulative score (0–100) |
+| `model_version` | `model_version` | Model version that produced the fraud analysis |
 
 The API exposes `explanation` (camelCase-friendly); the database column is `explanation_json`. The backend maps between them.
 
