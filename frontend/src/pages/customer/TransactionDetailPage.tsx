@@ -1,5 +1,8 @@
+import { useEffect, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
+import { AxiosError } from 'axios'
 import type { TransactionResponse } from '@/types/transaction'
+import * as transactionApi from '@/services/api/transactionApi'
 import FraudSummary from '@/components/customer/FraudSummary'
 import ScoreBreakdown from '@/components/customer/ScoreBreakdown'
 import FraudExplanation from '@/components/customer/FraudExplanation'
@@ -10,9 +13,95 @@ import { Button } from '@/components/ui/button'
 function TransactionDetailPage() {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
-  const transaction = (location.state as TransactionResponse | null) ?? null
+  const stateTx = (location.state as TransactionResponse | null) ?? null
 
-  // Empty state — page opened without transaction data
+  const [transaction, setTransaction] = useState<TransactionResponse | null>(
+    stateTx,
+  )
+  const [isLoading, setIsLoading] = useState(false)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // Fetch full details when router state is missing or stale
+  useEffect(() => {
+    if (!id) return
+    if (transaction && transaction.id === id) return
+
+    let cancelled = false
+    setIsLoading(true)
+    setErrorMsg(null)
+
+    transactionApi
+      .getTransaction(id)
+      .then((data) => {
+        if (!cancelled) setTransaction(data)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof AxiosError) {
+          if (err.response?.status === 403) {
+            setErrorMsg(
+              'You are not authorized to view this transaction.',
+            )
+            return
+          }
+          if (err.response?.status === 404) {
+            setErrorMsg('Transaction not found.')
+            return
+          }
+        }
+        setErrorMsg(
+          'Failed to load transaction details. Please try again.',
+        )
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [id, transaction])
+
+  // Loading state
+  if (isLoading) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-semibold text-foreground">
+          Transaction Detail
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          Loading transaction details&hellip;
+        </p>
+      </div>
+    )
+  }
+
+  // Error state
+  if (errorMsg) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-semibold text-foreground">
+          Transaction Detail
+        </h1>
+        <div
+          className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
+          role="alert"
+        >
+          {errorMsg}
+        </div>
+        <div className="flex gap-3">
+          <Link to="/customer/history">
+            <Button variant="outline">Transaction History</Button>
+          </Link>
+          <Link to="/customer">
+            <Button variant="outline">New Transaction</Button>
+          </Link>
+        </div>
+      </div>
+    )
+  }
+
+  // Empty state — no data available
   if (!transaction) {
     return (
       <div className="space-y-6">
@@ -22,9 +111,14 @@ function TransactionDetailPage() {
         <p className="text-muted-foreground">
           Transaction details are not available.
         </p>
-        <Link to="/customer">
-          <Button variant="outline">Back to Banking</Button>
-        </Link>
+        <div className="flex gap-3">
+          <Link to="/customer/history">
+            <Button variant="outline">Transaction History</Button>
+          </Link>
+          <Link to="/customer">
+            <Button variant="outline">New Transaction</Button>
+          </Link>
+        </div>
       </div>
     )
   }
@@ -40,11 +134,18 @@ function TransactionDetailPage() {
             Fraud analysis for transaction {id}
           </p>
         </div>
-        <Link to="/customer">
-          <Button variant="outline" size="sm">
-            New Transaction
-          </Button>
-        </Link>
+        <div className="flex gap-2">
+          <Link to="/customer/history">
+            <Button variant="outline" size="sm">
+              History
+            </Button>
+          </Link>
+          <Link to="/customer">
+            <Button variant="outline" size="sm">
+              New Transaction
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Fraud Analysis Summary */}

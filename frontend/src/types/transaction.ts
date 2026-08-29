@@ -65,6 +65,41 @@ export interface TransactionAlertSummary {
   created_at: string
 }
 
+// ── List / pagination types ─────────────────────────────────────────
+
+/** Query parameters for GET /api/v1/transactions */
+export interface TransactionQueryParams {
+  page?: number
+  per_page?: number
+  status?: TransactionStatus
+  risk_level?: RiskLevel
+  from_date?: string
+  to_date?: string
+}
+
+/** Single item in the transaction list response */
+export interface TransactionSummaryItem {
+  id: string
+  customer_id: string
+  merchant_name: string
+  amount: number
+  currency: string
+  transaction_type: TransactionType
+  timestamp: string
+  status: TransactionStatus
+  risk_score: number
+  risk_level: RiskLevel
+  decision: Decision
+}
+
+/** Paginated response from GET /api/v1/transactions */
+export interface TransactionListResponse {
+  items: TransactionSummaryItem[]
+  total: number
+  page: number
+  per_page: number
+}
+
 // ── Response type ───────────────────────────────────────────────────
 
 /** POST /api/v1/transactions — response body (201) */

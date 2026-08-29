@@ -1,5 +1,5 @@
 import { useContext } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { AuthContext } from '@/context/AuthContext'
 import type { User } from '@/types/auth'
 import { Button } from '@/components/ui/button'
@@ -41,6 +41,37 @@ function CustomerLayout() {
           </div>
         </div>
       </header>
+
+      {/* Navigation */}
+      <nav className="border-b bg-card" aria-label="Customer navigation">
+        <div className="mx-auto flex max-w-7xl gap-4 px-4 py-2">
+          <NavLink
+            to="/customer"
+            end
+            className={({ isActive }) =>
+              `text-sm font-medium transition-colors ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`
+            }
+          >
+            Banking
+          </NavLink>
+          <NavLink
+            to="/customer/history"
+            className={({ isActive }) =>
+              `text-sm font-medium transition-colors ${
+                isActive
+                  ? 'text-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`
+            }
+          >
+            Transaction History
+          </NavLink>
+        </div>
+      </nav>
 
       {/* Main content */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6">

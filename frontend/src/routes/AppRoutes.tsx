@@ -9,6 +9,7 @@ import LoginPage from '@/pages/auth/LoginPage'
 import RegisterPage from '@/pages/auth/RegisterPage'
 import BankingPage from '@/pages/customer/BankingPage'
 import TransactionDetailPage from '@/pages/customer/TransactionDetailPage'
+import TransactionHistoryPage from '@/pages/customer/TransactionHistoryPage'
 import DashboardPage from '@/pages/analyst/DashboardPage'
 import AlertDetailPage from '@/pages/analyst/AlertDetailPage'
 import FraudCheckPage from '@/pages/analyst/FraudCheckPage'
@@ -34,6 +35,7 @@ function AppRoutes() {
         }
       >
         <Route path="/customer" element={<BankingPage />} />
+        <Route path="/customer/history" element={<TransactionHistoryPage />} />
         <Route path="/customer/transactions/:id" element={<TransactionDetailPage />} />
       </Route>
 
