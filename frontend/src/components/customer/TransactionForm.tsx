@@ -62,6 +62,8 @@ export type TransactionFormValues = z.infer<typeof transactionSchema>
 
 export interface TransactionFormProps {
   onSubmit: (values: TransactionFormValues) => void | Promise<void>
+  onSuccess?: () => void
+  onError?: (message: string) => void
   disabled?: boolean
 }
 
@@ -83,7 +85,12 @@ const selectClasses =
 
 // ── Component ───────────────────────────────────────────────────────
 
-function TransactionForm({ onSubmit, disabled }: TransactionFormProps) {
+function TransactionForm({
+  onSubmit,
+  onSuccess,
+  onError,
+  disabled,
+}: TransactionFormProps) {
   const [submitted, setSubmitted] = useState(false)
 
   // Generate a stable fingerprint for this browser session
@@ -119,10 +126,19 @@ function TransactionForm({ onSubmit, disabled }: TransactionFormProps) {
   } = form
 
   const handleValidSubmit = handleSubmit(async (data) => {
-    await onSubmit(data)
-    setSubmitted(true)
-    reset()
-    setTimeout(() => setSubmitted(false), 5000)
+    try {
+      await onSubmit(data)
+      setSubmitted(true)
+      onSuccess?.()
+      reset()
+      setTimeout(() => setSubmitted(false), 5000)
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'An unexpected error occurred. Please try again.'
+      onError?.(message)
+    }
   })
 
   return (
