@@ -1,0 +1,31 @@
+# ==============================================================================
+# Docker Compose - Local Development Infrastructure
+# ==============================================================================
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose up postgres    # Start only PostgreSQL
+#   docker compose down -v        # Stop and remove volumes
+# ==============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fraud_detection_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fraud_detection}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

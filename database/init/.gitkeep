@@ -1,0 +1,2 @@
+# This directory holds Docker entrypoint init scripts for PostgreSQL.
+# SQL files placed here will be executed on first container start.
