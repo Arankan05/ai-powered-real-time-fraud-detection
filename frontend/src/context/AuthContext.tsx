@@ -20,7 +20,7 @@ export interface AuthContextType {
   isAuthenticated: boolean
   isLoading: boolean
   isInitializing: boolean
-  login: (data: LoginRequest) => Promise<void>
+  login: (data: LoginRequest) => Promise<User>
   register: (data: RegisterRequest) => Promise<void>
   logout: () => void
 }
@@ -80,6 +80,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       setTokens(response.access_token, response.refresh_token)
       const currentUser = await authApi.getCurrentUser()
       setUser(currentUser)
+      return currentUser
     } finally {
       setIsLoading(false)
     }
