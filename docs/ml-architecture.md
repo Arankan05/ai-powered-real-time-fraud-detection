@@ -2,7 +2,9 @@
 
 ## Overview
 
-The ML subsystem provides three independent fraud intelligence signals that are combined by the backend's risk aggregator.
+The ML/Fraud Intelligence Service is a **separate internal HTTP service** that provides three independent fraud intelligence signals combined by a risk aggregator. It runs on `ML_SERVICE_HOST:ML_SERVICE_PORT` and is called by the backend via HTTP for every transaction.
+
+The ML/Fraud developer (Developer C) owns all components of this service: feature engineering, ML model, behaviour engine, rule engine, risk aggregation, explainability, and decision engine.
 
 ```
 Transaction + Customer Profile + History
@@ -28,6 +30,85 @@ Transaction + Customer Profile + History
            │   Aggregator  │
            └───────────────┘
 ```
+
+## ML Service HTTP Interface
+
+The backend calls the ML/Fraud Intelligence Service for every transaction and fraud check request.
+
+### Request Schema
+
+```
+POST /predict
+Content-Type: application/json
+
+{
+  "customer_id": "uuid",
+  "customer_history": {
+    "transaction_count_30d": 15,
+    "avg_amount_30d": 500.00,
+    "std_amount_30d": 200.00,
+    "last_transaction_country": "US",
+    "last_transaction_timestamp": "2026-08-29T10:00:00Z",
+    "known_device_fingerprints": ["abc123", "def456"],
+    "known_merchant_ids": ["uuid1", "uuid2"],
+    "previous_flagged_count": 0
+  },
+  "transaction": {
+    "amount": 1500.00,
+    "currency": "USD",
+    "merchant_id": "uuid",
+    "merchant_name": "Acme Electronics",
+    "merchant_category": "5732",
+    "transaction_type": "purchase",
+    "location_country": "US",
+    "location_city": "New York",
+    "device_fingerprint": "abc123def456",
+    "device_type": "mobile",
+    "ip_address": "192.168.1.100",
+    "timestamp": "2026-08-29T14:30:00Z"
+  }
+}
+```
+
+### Response Schema
+
+```
+{
+  "ml_score": 35,
+  "behaviour_score": 52,
+  "rule_score": 15,
+  "risk_score": 45,
+  "risk_level": "MEDIUM",
+  "decision": "VERIFY",
+  "explanation": {
+    "ml_top_factors": [
+      { "feature": "amount_deviation", "importance": 0.35 },
+      { "feature": "is_new_device", "importance": 0.22 }
+    ],
+    "behaviour_signals": [
+      { "signal": "spending_amount_anomaly", "severity": 0.6 },
+      { "signal": "device_anomaly", "severity": 0.5 }
+    ],
+    "rules_triggered": [
+      { "rule": "new_device_high_amount", "contribution": 15 }
+    ]
+  },
+  "risk_factors": ["amount_deviation", "is_new_device", "new_device_high_amount"],
+  "model_version": "fraud-xgb-v1.2.0"
+}
+```
+
+### Failure Handling
+
+| Scenario | Behaviour |
+|---|---|
+| **Timeout** (configurable, default 5s) | Backend returns 503 to client; transaction marked with `status = 'ERROR'` |
+| **Connection refused** | Backend returns 503 to client; logs alert; transaction not persisted |
+| **Model not available** | ML service returns 503 with `{ "error": "MODEL_NOT_AVAILABLE" }`; backend propagates 503 |
+| **ML service unhealthy** | Backend `/api/v1/health` reports `ml_service.status = "unavailable"` |
+| **Invalid response from ML** | Backend logs error, returns 500 to client |
+
+The backend **never** calculates ML predictions itself. If the ML service is unavailable, the transaction cannot be processed.
 
 ## 1. Feature Engineering
 
@@ -144,17 +225,18 @@ Rules and their score contributions are configurable and can be adjusted without
 
 - A cumulative rule-based score in the range [0, 100], capped at 100.
 
-## 5. Risk Aggregation (Backend Responsibility)
+## 5. Risk Aggregation
 
-The backend combines the three scores:
+The ML/Fraud Intelligence Service combines the three scores internally:
 
 ```
 risk_score = (w_ml × ml_score) + (w_behaviour × behaviour_score) + (w_rule × rule_score)
 ```
 
-- Weights are configurable via environment variables.
+- Weights are configurable via environment variables (`ML_WEIGHT_ML`, `ML_WEIGHT_BEHAVIOUR`, `ML_WEIGHT_RULE`).
 - Default weights: `w_ml = 0.50`, `w_behaviour = 0.30`, `w_rule = 0.20`.
 - Final score is clamped to [0, 100].
+- The backend receives the aggregated score and persists it; the backend does not recalculate or modify it.
 
 The decision engine then applies configurable thresholds:
 
@@ -180,11 +262,20 @@ The top N contributing factors are returned in the API response and stored in `t
 
 | Stage | Description |
 |---|---|
-| Training | Offline batch process; outputs a serialised model artefact. |
-| Validation | Held-out test set evaluation; metrics logged to `model_metadata`. |
-| Deployment | Model artefact loaded into the inference service at startup. |
+| Training | Offline batch process; outputs a serialised model artefact (.joblib). |
+| Validation | Held-out test set evaluation; metrics logged to `model_metadata` table. |
+| Deployment | Model artefact stored at `ML_MODEL_PATH`. Service loads on startup. |
 | Monitoring | Track prediction distribution drift over time (future). |
 | Retraining | Triggered manually or on a schedule when performance degrades (future). |
+
+### Model Loading
+
+- **Artifact location:** Path specified by `ML_MODEL_PATH` environment variable (e.g., `ml/models/fraud_xgb_v1.joblib`).
+- **Version selection:** The latest model from `model_metadata` table, or the path specified by `ML_MODEL_VERSION` env var.
+- **Startup behaviour:** The ML service loads the model at startup. If the model file is missing or corrupt, the service starts in a `model_unavailable` state.
+- **Health endpoint:** The ML service exposes a `/health` endpoint that reports `{ "status": "ready", "model_version": "..." }` or `{ "status": "model_unavailable" }`.
+- **Cold start (no trained model):** The service starts and reports `model_unavailable`. All `/predict` requests return 503. The backend propagates this as 503 to clients.
+- **Model version in response:** Every prediction response includes `model_version` identifying which model was used.
 
 ## Data Policy
 

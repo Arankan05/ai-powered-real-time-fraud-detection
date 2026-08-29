@@ -15,16 +15,16 @@ The fraud detection system follows a layered, pipeline-based architecture that s
               │           HTTPS               │
               ▼                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    API Gateway (FastAPI)                      │
+│                   Backend (FastAPI)                           │
 │  ┌─────────┐  ┌──────────────┐  ┌──────────┐  ┌─────────┐ │
 │  │  Auth   │  │ Transactions │  │  Alerts   │  │Customers│ │
 │  │ Service │  │   Service    │  │  Service  │  │ Service │ │
 │  └─────────┘  └──────┬───────┘  └──────────┘  └─────────┘ │
 └───────────────────────┼─────────────────────────────────────┘
-                        │
+                        │ Internal HTTP
                         ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                   Fraud Detection Pipeline                    │
+│           ML / Fraud Intelligence Service (separate)         │
 │                                                               │
 │  ┌──────────────────┐                                        │
 │  │ Feature          │  Extract features from transaction     │
@@ -59,8 +59,9 @@ The fraud detection system follows a layered, pipeline-based architecture that s
 ┌─────────────────────────────────────────────────────────────┐
 │                     Data Layer                                │
 │  ┌──────────────┐                                           │
-│  │  PostgreSQL  │  Transactions, customers, alerts,          │
-│  │              │  audit logs, risk results                   │
+│  │  PostgreSQL  │  Users, customers, merchants, transactions,│
+│  │              │  alerts, audit logs, model metadata,       │
+│  │              │  risk rules config, customer devices       │
 │  └──────────────┘                                           │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -74,19 +75,36 @@ The fraud detection system follows a layered, pipeline-based architecture that s
 
 ### API Layer (FastAPI)
 
-- JWT authentication and role-based authorisation (customer, analyst, admin).
+- JWT authentication and role-based authorisation (customer, fraud_analyst, admin).
 - Input validation via Pydantic schemas.
-- Orchestrates the fraud detection pipeline for each transaction.
-- Exposes REST endpoints for transactions, alerts, customers, and analytics.
+- Orchestrates the fraud detection pipeline by calling the ML/Fraud Intelligence Service via internal HTTP.
+- Persists transactions, fraud results, and alerts to PostgreSQL.
+- Maps ML service responses to API response format.
+- Exposes REST endpoints for auth, transactions, fraud checks, alerts, customers, analytics, and health.
 
-### Fraud Detection Pipeline
+### ML / Fraud Intelligence Service (Separate Process)
 
-The pipeline runs synchronously for each transaction and consists of four independent scoring stages followed by aggregation:
+The ML/Fraud Intelligence Service runs as a **separate internal HTTP service** (not in-process). It is owned by Developer C (ML/Fraud developer).
 
-1. **ML Prediction** — Supervised model outputs a fraud probability based on engineered features.
-2. **Behavioural Anomaly Analysis** — Detects deviations from the customer's established behavioural baseline (spending patterns, typical locations, devices, time-of-day).
-3. **Rule-Based Risk Signals** — Evaluates configurable business rules (e.g., velocity limits, high-risk merchant categories, impossible travel).
-4. **Risk Aggregator** — Combines the three scores using weighted aggregation into a single 0–100 risk score.
+It provides:
+
+1. **Feature Engineering** — Transforms raw transaction + customer data into model features.
+2. **ML Prediction** — Supervised model outputs a fraud probability (0–100).
+3. **Behavioural Anomaly Analysis** — Detects deviations from customer baseline (0–100).
+4. **Rule-Based Risk Signals** — Evaluates configurable rules from `risk_rules_config` table (0–100).
+5. **Risk Aggregation** — Weighted combination: `risk_score = (w_ml × ml_score) + (w_behaviour × behaviour_score) + (w_rule × rule_score)`. Clamped to [0, 100].
+6. **Explainability** — SHAP values, rule triggers, and behavioural deviations.
+7. **Decision Engine** — Maps risk score to APPROVE/VERIFY/HOLD using configurable thresholds.
+
+The backend never calculates ML predictions, behaviour scores, or rule scores itself. All fraud intelligence is computed by this service and returned via HTTP.
+
+### Backend Responsibilities (for the fraud pipeline)
+
+- Call the ML/Fraud Intelligence Service via internal HTTP for each transaction.
+- Persist the returned scores, risk level, decision, and explanation to the `transactions` table.
+- Create an `alerts` record when the decision is HOLD.
+- Map the ML service response to the API response format (DB `explanation_json` → API `explanation`).
+- Handle ML service failures gracefully (timeout, connection error, model unavailable).
 
 ### Explainability Module
 
@@ -108,7 +126,7 @@ The pipeline runs synchronously for each transaction and consists of four indepe
 
 ### Data Layer
 
-- **PostgreSQL** stores all persistent data: customers, transactions, alerts, audit logs, risk results, and model metadata.
+- **PostgreSQL** stores: `users`, `customers`, `merchants`, `transactions`, `alerts`, `audit_logs`, `customer_devices`, `model_metadata`, `risk_rules_config`.
 - Schema is managed exclusively through Alembic migrations.
 - No real banking data is used. Synthetic data and public datasets are used for development and ML training.
 
@@ -117,13 +135,14 @@ The pipeline runs synchronously for each transaction and consists of four indepe
 | Interaction | Pattern | Protocol |
 |---|---|---|
 | Frontend → Backend | Synchronous request/response | HTTPS (REST/JSON) |
-| Backend → ML | In-process call or internal HTTP | Function call / HTTP |
+| Backend → ML/Fraud Service | Synchronous internal HTTP | HTTP (REST/JSON) on `ML_SERVICE_HOST:ML_SERVICE_PORT` |
 | Backend → Database | Synchronous ORM | SQLAlchemy over PostgreSQL wire |
 
 ## Security Architecture
 
 - JWT bearer tokens for authentication.
-- Role-based access control (RBAC): customer, fraud_analyst, admin.
+- Role-based access control (RBAC): `customer`, `fraud_analyst`, `admin`. Roles stored in the `users` table.
+- Separate `users` table for authentication; `customers` table for business profiles.
 - All sensitive configuration via environment variables.
 - Passwords hashed with bcrypt.
 - Audit log captures all state-changing operations with actor, timestamp, and action.
@@ -131,7 +150,7 @@ The pipeline runs synchronously for each transaction and consists of four indepe
 
 ## Deployment Model
 
-- Local development: Docker Compose with PostgreSQL. Backend, frontend, and ML run as local processes.
+- Local development: Docker Compose with PostgreSQL. Backend, frontend, and ML/Fraud Intelligence service run as separate local processes.
 - Production (future): Containerised services behind a reverse proxy with managed PostgreSQL.
 
 ## Status
