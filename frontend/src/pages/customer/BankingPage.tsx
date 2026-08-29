@@ -1,23 +1,20 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { AxiosError } from 'axios'
 import TransactionForm from '@/components/customer/TransactionForm'
 import type { TransactionFormValues } from '@/components/customer/TransactionForm'
-import type { TransactionResponse } from '@/types/transaction'
 import type { ApiError } from '@/types/auth'
 import * as transactionApi from '@/services/api/transactionApi'
 
 function BankingPage() {
-  const [transaction, setTransaction] = useState<TransactionResponse | null>(
-    null,
-  )
+  const navigate = useNavigate()
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   const handleCreateTransaction = async (values: TransactionFormValues) => {
     setErrorMsg(null)
-    setTransaction(null)
     try {
       const result = await transactionApi.createTransaction(values)
-      setTransaction(result)
+      navigate(`/customer/transactions/${result.id}`, { state: result })
     } catch (err) {
       if (err instanceof AxiosError) {
         const data = err.response?.data as ApiError | undefined
@@ -45,7 +42,6 @@ function BankingPage() {
         </p>
       </div>
 
-      {/* Error from previous attempt */}
       {errorMsg && (
         <div
           className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
@@ -55,26 +51,10 @@ function BankingPage() {
         </div>
       )}
 
-      {/* Minimal truthful confirmation from actual backend response */}
-      {transaction && (
-        <div
-          className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-4 text-sm text-emerald-700"
-          role="status"
-        >
-          <p className="font-medium">Transaction submitted successfully</p>
-          <p className="mt-1 text-xs">
-            ID: {transaction.id} &middot; Status: {transaction.status}
-          </p>
-        </div>
-      )}
-
       <TransactionForm
         onSubmit={handleCreateTransaction}
         onError={setErrorMsg}
-        onSuccess={() => {
-          setErrorMsg(null)
-          setTransaction(null)
-        }}
+        onSuccess={() => setErrorMsg(null)}
       />
     </div>
   )
