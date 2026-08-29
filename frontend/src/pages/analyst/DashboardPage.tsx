@@ -10,6 +10,7 @@ import type { DashboardResponse } from '@/types/dashboard'
 import * as analyticsApi from '@/services/api/analyticsApi'
 import StatCard from '@/components/analyst/StatCard'
 import RiskDistributionChart from '@/components/analyst/RiskDistributionChart'
+import TransactionsOverTimeChart from '@/components/analyst/TransactionsOverTimeChart'
 import { Button } from '@/components/ui/button'
 
 function DashboardPage() {
@@ -110,6 +111,11 @@ function DashboardPage() {
           {/* Risk Distribution */}
           <RiskDistributionChart
             riskDistribution={dashboard.risk_distribution}
+          />
+
+          {/* Transactions Over Time */}
+          <TransactionsOverTimeChart
+            transactions={dashboard.transactions_over_time}
           />
         </>
       )}
