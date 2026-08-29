@@ -11,6 +11,7 @@ import * as analyticsApi from '@/services/api/analyticsApi'
 import StatCard from '@/components/analyst/StatCard'
 import RiskDistributionChart from '@/components/analyst/RiskDistributionChart'
 import TransactionsOverTimeChart from '@/components/analyst/TransactionsOverTimeChart'
+import TopRiskFactorsChart from '@/components/analyst/TopRiskFactorsChart'
 import { Button } from '@/components/ui/button'
 
 function DashboardPage() {
@@ -116,6 +117,11 @@ function DashboardPage() {
           {/* Transactions Over Time */}
           <TransactionsOverTimeChart
             transactions={dashboard.transactions_over_time}
+          />
+
+          {/* Top Risk Factors */}
+          <TopRiskFactorsChart
+            riskFactors={dashboard.top_risk_factors}
           />
         </>
       )}
