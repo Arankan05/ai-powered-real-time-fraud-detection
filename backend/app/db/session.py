@@ -15,6 +15,7 @@ from app.config import settings
 
 engine = create_engine(
     settings.postgres.database_url,
+    connect_args=settings.postgres.connect_args,
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=10,

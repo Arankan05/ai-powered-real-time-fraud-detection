@@ -41,13 +41,18 @@ class BackendSettings(BaseSettings):
 
 
 class PostgresSettings(BaseSettings):
-    """PostgreSQL connection settings."""
+    """PostgreSQL connection settings.
+
+    Works with both local PostgreSQL and remote providers such as Supabase.
+    Set ``POSTGRES_SSL_MODE=require`` for remote databases that enforce SSL.
+    """
 
     host: str = "localhost"
     port: int = 5432
     db: str = "fraud_detection"
     user: str = ""
     password: str = ""
+    ssl_mode: str = "prefer"
 
     model_config = SettingsConfigDict(env_prefix="POSTGRES_", env_file=str(_ENV_FILE), extra="ignore")
 
@@ -66,6 +71,15 @@ class PostgresSettings(BaseSettings):
             port=self.port,
             database=self.db,
         ).render_as_string(hide_password=False)
+
+    @property
+    def connect_args(self) -> dict[str, str]:
+        """Extra arguments forwarded to the database driver.
+
+        Includes ``sslmode`` so remote providers (e.g. Supabase) that
+        require TLS can be reached safely.
+        """
+        return {"sslmode": self.ssl_mode}
 
 
 class MLServiceSettings(BaseSettings):
