@@ -7,17 +7,26 @@ import {
   CheckCircle,
 } from 'lucide-react'
 import type { DashboardResponse } from '@/types/dashboard'
+import type { TransactionSummaryItem } from '@/types/transaction'
 import * as analyticsApi from '@/services/api/analyticsApi'
+import * as transactionApi from '@/services/api/transactionApi'
 import StatCard from '@/components/analyst/StatCard'
 import RiskDistributionChart from '@/components/analyst/RiskDistributionChart'
 import TransactionsOverTimeChart from '@/components/analyst/TransactionsOverTimeChart'
 import TopRiskFactorsChart from '@/components/analyst/TopRiskFactorsChart'
+import RecentTransactions from '@/components/analyst/RecentTransactions'
 import { Button } from '@/components/ui/button'
 
 function DashboardPage() {
+  // ── Dashboard analytics state ──────────────────────────────────────
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // ── Recent transactions state ─────────────────────────────────────
+  const [recentTransactions, setRecentTransactions] = useState<TransactionSummaryItem[]>([])
+  const [isTransactionsLoading, setIsTransactionsLoading] = useState(true)
+  const [transactionsError, setTransactionsError] = useState<string | null>(null)
 
   const fetchDashboard = useCallback(async () => {
     setIsLoading(true)
@@ -49,6 +58,34 @@ function DashboardPage() {
   useEffect(() => {
     void fetchDashboard()
   }, [fetchDashboard])
+
+  const fetchTransactions = useCallback(async () => {
+    setIsTransactionsLoading(true)
+    setTransactionsError(null)
+    try {
+      const result = await transactionApi.getTransactions({
+        page: 1,
+        per_page: 5,
+      })
+      setRecentTransactions(result.items)
+    } catch (err) {
+      if (err instanceof AxiosError) {
+        if (err.response?.status === 403) {
+          setTransactionsError('You are not authorized to view transactions.')
+          return
+        }
+        setTransactionsError('Unable to load recent transactions.')
+        return
+      }
+      setTransactionsError('Unable to connect to the server.')
+    } finally {
+      setIsTransactionsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void fetchTransactions()
+  }, [fetchTransactions])
 
   return (
     <div className="space-y-6">
@@ -124,6 +161,26 @@ function DashboardPage() {
             riskFactors={dashboard.top_risk_factors}
           />
         </>
+      )}
+
+      {/* Recent Transactions — independent of dashboard analytics */}
+      {isTransactionsLoading && (
+        <p className="py-8 text-center text-sm text-muted-foreground">
+          Loading recent transactions&hellip;
+        </p>
+      )}
+
+      {transactionsError && (
+        <div
+          className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
+          role="alert"
+        >
+          {transactionsError}
+        </div>
+      )}
+
+      {!isTransactionsLoading && !transactionsError && (
+        <RecentTransactions transactions={recentTransactions} />
       )}
     </div>
   )
