@@ -12,6 +12,7 @@ import TransactionDetailPage from '@/pages/customer/TransactionDetailPage'
 import TransactionHistoryPage from '@/pages/customer/TransactionHistoryPage'
 import DashboardPage from '@/pages/analyst/DashboardPage'
 import AlertDetailPage from '@/pages/analyst/AlertDetailPage'
+import AlertsPage from '@/pages/analyst/AlertsPage'
 import FraudCheckPage from '@/pages/analyst/FraudCheckPage'
 
 function AppRoutes() {
@@ -48,6 +49,7 @@ function AppRoutes() {
         }
       >
         <Route path="/analyst/dashboard" element={<DashboardPage />} />
+        <Route path="/analyst/alerts" element={<AlertsPage />} />
         <Route path="/analyst/alerts/:id" element={<AlertDetailPage />} />
         <Route path="/analyst/fraud-check" element={<FraudCheckPage />} />
       </Route>
