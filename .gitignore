@@ -69,6 +69,7 @@ ml/models/*.pkl
 ml/models/*.joblib
 ml/models/*.h5
 ml/datasets/raw/
+ml/datasets/processed/
 ml/notebooks/.ipynb_checkpoints/
 *.ipynb_checkpoints/
 
