@@ -13,7 +13,7 @@ Migrations live in ``database/alembic/versions/``.
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 # ---------------------------------------------------------------------------
 # Import the declarative Base so Alembic can inspect model metadata.
@@ -26,6 +26,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "backend"))
 
 from app.db.base import Base  # noqa: E402
+
+# Import all models so they register with Base.metadata before
+# Alembic inspects it for autogenerate.
+import app.models  # noqa: E402, F401
 
 # Alembic Config object — provides access to alembic.ini values.
 config = context.config
@@ -43,7 +47,8 @@ target_metadata = Base.metadata
 # ---------------------------------------------------------------------------
 from app.config import PostgresSettings  # noqa: E402
 
-config.set_main_option("sqlalchemy.url", PostgresSettings().database_url)
+_pg_settings = PostgresSettings()
+config.set_main_option("sqlalchemy.url", _pg_settings.database_url.replace("%", "%%"))
 
 
 # ---------------------------------------------------------------------------
@@ -67,9 +72,9 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode against a live database."""
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        _pg_settings.database_url,
+        connect_args=_pg_settings.connect_args,
         poolclass=pool.NullPool,
     )
 

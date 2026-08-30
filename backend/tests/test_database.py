@@ -101,9 +101,17 @@ class TestDeclarativeBase:
     def test_base_has_metadata(self) -> None:
         assert Base.metadata is not None
 
-    def test_base_metadata_is_empty(self) -> None:
-        """No models are registered yet (models come in the next task)."""
-        assert len(Base.metadata.tables) == 0
+    def test_base_metadata_contains_nine_application_tables(self) -> None:
+        """Exactly 9 application models must be registered with Base.metadata."""
+        import app.models  # noqa: F401 — triggers model registration
+
+        table_names = set(Base.metadata.tables.keys())
+        expected = {
+            "users", "customers", "merchants", "transactions",
+            "alerts", "audit_logs", "customer_devices",
+            "model_metadata", "risk_rules_config",
+        }
+        assert table_names == expected
 
 
 # ---------------------------------------------------------------------------
