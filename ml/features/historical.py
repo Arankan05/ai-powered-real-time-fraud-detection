@@ -190,12 +190,6 @@ def compute_is_new_features(df: pd.DataFrame) -> pd.DataFrame:
     for _, group in grouped:
         sorted_g = group.sort_values("TransactionDT")
 
-        # Cumulative-max trick: track whether value has been seen before
-        addr2_vals = sorted_g["addr2"].values
-        addr2_seen = pd.Series(addr2_vals).expanding().apply(
-            lambda x: len(set(x[:-1])) if len(x) > 1 else 0, raw=False
-        )
-        # Vectorised: use shifted cumulative sets
         seen_locs: set = set()
         seen_prods: set = set()
 
