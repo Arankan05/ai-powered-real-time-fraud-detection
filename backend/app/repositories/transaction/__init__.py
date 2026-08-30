@@ -1,4 +1,4 @@
-"""Data-access layer for customer, transaction, and alert operations."""
+"""Data-access layer for customer, transaction, alert, and audit operations."""
 
 from __future__ import annotations
 
@@ -7,13 +7,15 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.alert import Alert
+from app.models.audit_log import AuditLog
 from app.models.customer import Customer
 from app.models.customer_device import CustomerDevice
 from app.models.merchant import Merchant
 from app.models.transaction import Transaction
+from app.models.user import User
 
 
 class CustomerRepository:
@@ -247,3 +249,89 @@ class AlertRepository:
     def get_by_transaction(self, transaction_id: UUID) -> Alert | None:
         stmt = select(Alert).where(Alert.transaction_id == transaction_id)
         return self._db.execute(stmt).scalar_one_or_none()
+
+    def get_by_id(self, alert_id: UUID) -> Alert | None:
+        """Fetch a single alert with its related transaction."""
+        stmt = (
+            select(Alert)
+            .options(joinedload(Alert.transaction))
+            .where(Alert.id == alert_id)
+        )
+        return self._db.execute(stmt).unique().scalar_one_or_none()
+
+    def list_alerts(
+        self,
+        *,
+        status: str | None = None,
+        risk_level: str | None = None,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[list[Alert], int]:
+        """Return (items, total_count) with pagination and filters."""
+        stmt = select(Alert).options(joinedload(Alert.transaction))
+        count_stmt = select(func.count()).select_from(Alert)
+
+        if status is not None:
+            stmt = stmt.where(Alert.status == status)
+            count_stmt = count_stmt.where(Alert.status == status)
+        if risk_level is not None:
+            stmt = stmt.where(Alert.risk_level == risk_level)
+            count_stmt = count_stmt.where(Alert.risk_level == risk_level)
+
+        total = self._db.execute(count_stmt).scalar() or 0
+
+        stmt = stmt.order_by(Alert.created_at.desc())
+        stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+
+        items = list(self._db.execute(stmt).unique().scalars().all())
+        return items, total
+
+    def update(
+        self,
+        alert: Alert,
+        *,
+        status: str | None = None,
+        notes: str | None = None,
+        analyst_id: UUID | None = None,
+        resolved_at: datetime | None = None,
+    ) -> Alert:
+        """Update alert status and/or notes."""
+        if status is not None:
+            alert.status = status
+        if notes is not None:
+            alert.notes = notes
+        if analyst_id is not None and alert.analyst_id is None:
+            alert.analyst_id = analyst_id
+        if resolved_at is not None:
+            alert.resolved_at = resolved_at
+        self._db.flush()
+        return alert
+
+
+class AuditLogRepository:
+    """Database operations for audit logs (append-only)."""
+
+    def __init__(self, db: Session) -> None:
+        self._db = db
+
+    def create(
+        self,
+        *,
+        actor_id: UUID | None,
+        action: str,
+        resource_type: str,
+        resource_id: str | None = None,
+        details_json: dict | None = None,
+        ip_address: str | None = None,
+    ) -> AuditLog:
+        entry = AuditLog(
+            actor_id=actor_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            details_json=details_json,
+            ip_address=ip_address,
+        )
+        self._db.add(entry)
+        self._db.flush()
+        return entry

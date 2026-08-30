@@ -31,6 +31,7 @@ from app.core.errors import (
 from app.models.user import User
 from app.repositories.transaction import (
     AlertRepository,
+    AuditLogRepository,
     CustomerRepository,
     MerchantRepository,
     TransactionRepository,
@@ -224,6 +225,7 @@ class TransactionService:
         self._merchant_repo = MerchantRepository(db)
         self._customer_repo = CustomerRepository(db)
         self._alert_repo = AlertRepository(db)
+        self._audit_repo = AuditLogRepository(db)
         self._ml_client = ml_client or MLServiceClient()
 
     # -- Create transaction -----------------------------------------------
@@ -331,6 +333,32 @@ class TransactionService:
                 risk_level=ml_result["risk_level"],
                 decision=ml_result["decision"],
                 explanation_json=ml_result["explanation"],
+            )
+
+        # 9. Audit logging
+        self._audit_repo.create(
+            actor_id=current_user.id,
+            action="transaction_created",
+            resource_type="transaction",
+            resource_id=str(txn.id),
+            details_json={
+                "amount": float(data.amount),
+                "currency": data.currency,
+                "decision": ml_result["decision"],
+                "risk_level": ml_result["risk_level"],
+            },
+        )
+        if alert is not None:
+            self._audit_repo.create(
+                actor_id=current_user.id,
+                action="alert_created",
+                resource_type="alert",
+                resource_id=str(alert.id),
+                details_json={
+                    "transaction_id": str(txn.id),
+                    "risk_level": ml_result["risk_level"],
+                    "decision": ml_result["decision"],
+                },
             )
 
         self._db.commit()
