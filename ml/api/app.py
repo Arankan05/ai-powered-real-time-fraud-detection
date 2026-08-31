@@ -36,6 +36,7 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ml.features.engineer import engineer_features_for_inference
+from ml.features.history import history_store
 from ml.predict.bundle import model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
 
@@ -123,6 +124,12 @@ class RawTransactionInput(BaseModel):
     device_fingerprint: str = Field(..., min_length=1, max_length=255)
     device_type: str = Field(..., pattern=r"^(mobile|desktop|pos)$")
     ip_address: str = Field(..., min_length=7, max_length=45)
+
+    # -- optional: customer identification ---------------------------------
+    customer_id: str | None = Field(
+        None, min_length=1, max_length=255,
+        description="Customer identifier (falls back to device_fingerprint)",
+    )
 
     # -- optional: raw dataset field mappings ----------------------------
     timestamp: int | None = Field(
@@ -217,10 +224,12 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             detail="Model not available. Run `python -m ml.predict.save_model` first.",
         )
 
-    # Convert raw transaction to 24 engineered features
+    # Convert raw transaction to 24 engineered features (with history)
     raw_data = request.model_dump()
     try:
-        features_df = engineer_features_for_inference(raw_data)
+        features_df = engineer_features_for_inference(
+            raw_data, history_store=history_store
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -243,6 +252,40 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             FactorOutput(feature=f["feature"], importance=f["importance"])
             for f in result.explanation
         ]
+
+    # Record transaction in history store for future lookups
+    try:
+        from ml.features.engineer import _resolve_customer_id
+
+        cid = _resolve_customer_id(raw_data)
+
+        def _h_int(key: str, default: int) -> int:
+            v = raw_data.get(key)
+            return default if v is None else int(v)
+
+        def _h_str(key: str, default: str | None) -> str | None:
+            v = raw_data.get(key)
+            return default if v is None else str(v)
+
+        pc = _h_str("ProductCD", None) or _h_str("merchant_category", "W")
+        history_store.add(
+            cid,
+            {
+                "timestamp": _h_int("timestamp", 0),
+                "amount": float(raw_data["amount"]),
+                "product_cd": pc,
+                "addr1": _h_int("addr1", -1),
+                "addr2": _h_int("addr2", -1),
+                "device_type": _h_str("DeviceType", None),
+                "id_19": _h_str("id_19", None),
+                "id_20": _h_str("id_20", None),
+                "has_identity_data": _h_int("has_identity_data", 0),
+                "is_fraud": 0,  # unknown at prediction time
+            },
+        )
+    except Exception:
+        # History recording is best-effort — never block prediction
+        pass
 
     return PredictionResponse(
         fraud_probability=result.fraud_probability,

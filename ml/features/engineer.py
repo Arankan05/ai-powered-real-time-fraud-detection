@@ -270,29 +270,54 @@ def engineer_features(
 # ── Single-transaction inference ────────────────────────────────────
 
 
+def _resolve_customer_id(raw: dict[str, Any]) -> str:
+    """Determine the customer identifier from a raw transaction dict.
+
+    Priority:
+      1. Explicit ``customer_id`` field.
+      2. ``device_fingerprint`` (always present from the backend).
+      3. Fallback ``"unknown"``.
+    """
+    cid = raw.get("customer_id")
+    if cid is not None and str(cid).strip():
+        return str(cid)
+    fp = raw.get("device_fingerprint")
+    if fp is not None and str(fp).strip():
+        return str(fp)
+    return "unknown"
+
+
 def engineer_features_for_inference(
     raw: dict[str, Any],
+    *,
+    history_store: Any | None = None,
 ) -> pd.DataFrame:
     """Compute the 24 engineered features for a **single** raw transaction.
 
-    Historical features that require prior transactions receive
-    cold-start defaults as documented in :mod:`ml.features.historical`
-    (lines 8-19).  ``previous_suspicious_count`` is set to 0
-    (no prior fraud history) without accessing the ``isFraud`` label.
+    When *history_store* is provided and contains prior transactions
+    for the same customer, historical features are computed from real
+    history.  Otherwise cold-start defaults are used (as documented in
+    :mod:`ml.features.historical`, lines 8-19).
+
+    ``previous_suspicious_count`` uses the ``is_fraud`` field stored
+    in the history records (``0`` at prediction time).  No external
+    label data is accessed.
 
     Args:
         raw: Dict with keys matching the raw transaction payload
              sent by the backend (``TransactionCreate.model_dump()``).
-             Optional: ``timestamp``, ``card1``, ``addr1``, ``addr2``,
-             ``id_19``, ``id_20``, ``DeviceType``, ``has_identity_data``.
+             Optional: ``customer_id``, ``timestamp``, ``card1``,
+             ``addr1``, ``addr2``, ``id_19``, ``id_20``, ``DeviceType``,
+             ``has_identity_data``.
+        history_store: Optional
+             :class:`~ml.features.history.TransactionHistoryStore`
+             instance for customer-history lookup.
 
     Returns:
         Single-row :class:`pandas.DataFrame` with columns matching
         :data:`FEATURE_LIST` in the correct order.
     """
     # -- defaults for optional raw fields --------------------------------
-    # model_dump() returns None for unset optional fields, so use `or`
-    # coalescing instead of dict.get() defaults.
     def _int_or(key: str, default: int) -> int:
         v = raw.get(key)
         return default if v is None else int(v)
@@ -302,7 +327,6 @@ def engineer_features_for_inference(
         return default if v is None else str(v)
 
     timestamp = _int_or("timestamp", 0)
-    card1 = _int_or("card1", -1)
     addr1 = _int_or("addr1", -1)
     addr2 = _int_or("addr2", -1)
     id_19 = _str_or("id_19", None)
@@ -310,28 +334,77 @@ def engineer_features_for_inference(
     device_type = _str_or("DeviceType", None)
     product_cd = _str_or("ProductCD", None) or _str_or("merchant_category", "W")
     has_identity = _int_or("has_identity_data", 0)
+    amount = float(raw["amount"])
 
-    # -- build internal single-row DataFrame -----------------------------
-    df = pd.DataFrame(
-        [
+    # -- customer identification & card1 ---------------------------------
+    customer_id = _resolve_customer_id(raw)
+    # card1 must be consistent per customer for groupby.
+    # Use explicit card1 if provided, else hash of customer_id.
+    raw_card1 = raw.get("card1")
+    card1 = int(raw_card1) if raw_card1 is not None else hash(customer_id) & 0x7FFFFFFF
+
+    # -- history lookup --------------------------------------------------
+    history = []
+    if history_store is not None:
+        history = history_store.get(
+            customer_id, before_timestamp=timestamp
+        )
+
+    # -- build DataFrame rows (history + current) -----------------------
+    def _h_int(record: dict, key: str, default: int) -> int:
+        v = record.get(key)
+        return default if v is None else int(v)
+
+    def _h_float(record: dict, key: str, default: float) -> float:
+        v = record.get(key)
+        return default if v is None else float(v)
+
+    def _h_str(record: dict, key: str, default: str | None) -> str | None:
+        v = record.get(key)
+        return default if v is None else str(v)
+
+    rows: list[dict[str, Any]] = []
+    for h in history:
+        rows.append(
             {
                 "TransactionID": 0,
-                "isFraud": 0,  # placeholder — never used as a feature
-                "TransactionDT": timestamp,
-                "TransactionAmt": float(raw["amount"]),
-                "ProductCD": product_cd,
+                "isFraud": _h_int(h, "is_fraud", 0),
+                "TransactionDT": _h_int(h, "timestamp", 0),
+                "TransactionAmt": _h_float(h, "amount", 0.0),
+                "ProductCD": _h_str(h, "product_cd", "W") or "W",
                 "card1": card1,
-                "addr1": addr1,
-                "addr2": addr2,
-                "id_19": id_19,
-                "id_20": id_20,
-                "DeviceType": device_type,
-                "has_identity_data": np.int8(has_identity),
+                "addr1": _h_int(h, "addr1", -1),
+                "addr2": _h_int(h, "addr2", -1),
+                "id_19": _h_str(h, "id_19", None),
+                "id_20": _h_str(h, "id_20", None),
+                "DeviceType": _h_str(h, "device_type", None),
+                "has_identity_data": np.int8(_h_int(h, "has_identity_data", 0)),
             }
-        ]
+        )
+
+    # Current transaction (always last after sort)
+    rows.append(
+        {
+            "TransactionID": 0,
+            "isFraud": 0,  # placeholder — never used as a feature
+            "TransactionDT": timestamp,
+            "TransactionAmt": amount,
+            "ProductCD": product_cd,
+            "card1": card1,
+            "addr1": addr1,
+            "addr2": addr2,
+            "id_19": id_19,
+            "id_20": id_20,
+            "DeviceType": device_type,
+            "has_identity_data": np.int8(has_identity),
+        }
     )
 
-    # -- direct features (current row only) ------------------------------
+    df = pd.DataFrame(rows)
+    df = df.sort_values("TransactionDT").reset_index(drop=True)
+    n = len(df)  # total rows (history + 1)
+
+    # -- direct features -------------------------------------------------
     direct = _compute_direct_features(df)
 
     # -- identity features -----------------------------------------------
@@ -341,20 +414,21 @@ def engineer_features_for_inference(
         {"device_fingerprint": device_fp, "is_new_device": is_new_dev}
     )
 
-    # -- historical features (cold-start defaults for single row) --------
+    # -- historical features (real history or cold-start) ----------------
     historical = compute_all_historical_features(df)
 
-    # -- assemble --------------------------------------------------------
+    # -- assemble & extract current transaction (last row) ---------------
     features = pd.concat([direct, identity, historical], axis=1)
+    current = features.iloc[[-1]].reset_index(drop=True)
 
     # -- guarantee FEATURE_LIST columns ----------------------------------
-    missing = set(FEATURE_LIST) - set(features.columns)
+    missing = set(FEATURE_LIST) - set(current.columns)
     if missing:
         raise ValueError(
             f"Feature engineering missing columns: {sorted(missing)}"
         )
 
-    return features[FEATURE_LIST]
+    return current[FEATURE_LIST]
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
