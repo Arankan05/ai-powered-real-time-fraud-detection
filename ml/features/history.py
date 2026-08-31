@@ -5,43 +5,52 @@ Provides:
 * :class:`TransactionRecord` — typed dataclass for a single historical
   transaction.
 * :class:`CustomerHistoryRepository` — abstract protocol defining the
-  repository contract (for future database replacement).
-* :class:`InMemoryHistoryStore` — default in-memory implementation of
-  the protocol.
+  repository contract.
+* :class:`InMemoryHistoryStore` — volatile in-memory implementation
+  (fast, loses data on restart).
+* :class:`SQLiteHistoryRepository` — persistent SQLite-backed
+  implementation (survives restarts, safe for multiple workers via
+  WAL journal mode).
 * :func:`record_transaction` — helper that creates a history record
   from a raw transaction dict after a successful prediction.
 
 Design rationale
 ----------------
-No database persistence layer exists yet in the project.  This module
-provides the simplest implementation that fits the architecture:
+The ML / Fraud Intelligence Service is a standalone process that needs
+to persist customer transaction history across restarts.  The project
+plans PostgreSQL for the full backend (see ``docs/database-design.md``
+and ``docker-compose.yml``), but that infrastructure is not yet
+implemented.
 
-* Transactions are recorded after each successful prediction.
+For the ML service, **SQLite** (Python stdlib ``sqlite3``) is the
+smallest appropriate persistence layer:
+
+* Zero external dependencies (stdlib only).
+* No separate database server required.
+* WAL journal mode enables concurrent reads with a single writer.
+* Can be replaced by the planned PostgreSQL backend later by
+  implementing :class:`CustomerHistoryRepository` and swapping the
+  singleton in ``ml/api/app.py``.
+
+Leakage protections
+-----------------
+* Transactions are recorded **after** each successful prediction.
 * Lookups return only entries with ``timestamp < current_timestamp``
   (temporal safety — never uses future data).
 * ``is_fraud`` is stored as ``0`` at prediction time (the true label
-  is unknown).  An optional :meth:`~InMemoryHistoryStore.record_outcome`
-  method allows updating the label later when investigation results
-  are available.
-* The store is capped at ``max_per_customer`` entries per customer
-  (FIFO eviction) to bound memory usage.
+  is unknown).  :meth:`record_outcome` allows updating later.
 
-Replacing with a database
+Replacing with PostgreSQL
 -------------------------
-To swap the in-memory store for PostgreSQL (or another backend):
-
-1. Implement :class:`CustomerHistoryRepository` with DB queries.
-2. Replace the module-level :data:`history_store` singleton in
-   ``ml/api/app.py`` with the DB-backed instance.
-3. No changes to :mod:`ml.features.engineer` or the ML model are
-   needed — the feature-engineering pipeline only depends on the
-   protocol's ``get()`` / ``add()`` contract.
+1. Implement :class:`CustomerHistoryRepository` with SQL queries
+   against the planned ``transactions`` table.
+2. Replace the :data:`history_store` singleton in ``ml/api/app.py``.
+3. No changes to :mod:`ml.features.engineer` or the ML model needed.
 
 Thread safety
 -------------
-All mutations and reads in :class:`InMemoryHistoryStore` go through a
-:class:`threading.Lock` so the store is safe for concurrent access
-from FastAPI worker threads.
+Both implementations use :class:`threading.Lock` so they are safe for
+concurrent access from FastAPI worker threads.
 
 Usage::
 
@@ -57,7 +66,10 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+import os
+import sqlite3
 import threading
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -247,6 +259,205 @@ class InMemoryHistoryStore:
 TransactionHistoryStore = InMemoryHistoryStore
 
 
+# ── SQLite-backed implementation ────────────────────────────────────
+
+
+class SQLiteHistoryRepository:
+    """Persistent history store backed by SQLite.
+
+    Implements :class:`CustomerHistoryRepository`.  Uses WAL journal
+    mode for better concurrent read performance and creates the table
+    automatically on first use.
+
+    Thread safety is achieved via :class:`threading.Lock` — a single
+    shared connection (``check_same_thread=False``) is reused across
+    all operations.
+
+    Args:
+        db_path: Path to the SQLite database file.  Parent directories
+                 are created automatically.
+        max_per_customer: Maximum entries kept per customer.  Oldest
+                          entries are evicted when the limit is reached.
+    """
+
+    _SCHEMA = """
+        CREATE TABLE IF NOT EXISTS transaction_history (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id TEXT    NOT NULL,
+            timestamp  INTEGER NOT NULL,
+            amount     REAL    NOT NULL DEFAULT 0.0,
+            product_cd TEXT,
+            addr1      INTEGER,
+            addr2      INTEGER,
+            device_type TEXT,
+            id_19      TEXT,
+            id_20      TEXT,
+            has_identity_data INTEGER NOT NULL DEFAULT 0,
+            is_fraud   INTEGER NOT NULL DEFAULT 0
+        )
+    """
+    _INDEX = """
+        CREATE INDEX IF NOT EXISTS ix_history_customer_ts
+        ON transaction_history (customer_id, timestamp)
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path = "data/ml_history.db",
+        *,
+        max_per_customer: int = 1_000,
+    ) -> None:
+        self._max = max_per_customer
+        self._lock = threading.Lock()
+
+        db_path = Path(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._conn = sqlite3.connect(
+            str(db_path),
+            check_same_thread=False,
+        )
+        self._conn.row_factory = sqlite3.Row
+        # WAL mode: concurrent readers, single writer, survives crashes.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute(self._SCHEMA)
+        self._conn.execute(self._INDEX)
+        self._conn.commit()
+
+    # ── Mutations ────────────────────────────────────────────────────
+
+    def add(self, customer_id: str, record: dict[str, Any] | TransactionRecord) -> None:
+        """Record a transaction for *customer_id*.
+
+        Accepts both plain dicts and :class:`TransactionRecord`.
+        """
+        if isinstance(record, TransactionRecord):
+            record = record.to_dict()
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO transaction_history "
+                "(customer_id, timestamp, amount, product_cd, addr1, "
+                "addr2, device_type, id_19, id_20, has_identity_data, "
+                "is_fraud) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(customer_id),
+                    int(record.get("timestamp", 0)),
+                    float(record.get("amount", 0.0)),
+                    record.get("product_cd"),
+                    record.get("addr1"),
+                    record.get("addr2"),
+                    record.get("device_type"),
+                    record.get("id_19"),
+                    record.get("id_20"),
+                    int(record.get("has_identity_data", 0)),
+                    int(record.get("is_fraud", 0)),
+                ),
+            )
+            self._conn.commit()
+
+            # FIFO eviction when per-customer cap is exceeded.
+            count = self._conn.execute(
+                "SELECT COUNT(*) FROM transaction_history WHERE customer_id = ?",
+                (str(customer_id),),
+            ).fetchone()[0]
+            if count > self._max:
+                overflow = count - self._max
+                self._conn.execute(
+                    "DELETE FROM transaction_history WHERE id IN ("
+                    "  SELECT id FROM transaction_history"
+                    "  WHERE customer_id = ?"
+                    "  ORDER BY timestamp ASC, id ASC"
+                    "  LIMIT ?"
+                    ")",
+                    (str(customer_id), overflow),
+                )
+                self._conn.commit()
+
+    def record_outcome(
+        self,
+        customer_id: str,
+        timestamp: int,
+        is_fraud: int,
+    ) -> bool:
+        """Update ``is_fraud`` for a previously recorded transaction.
+
+        Matches by *customer_id* and *timestamp*.  Returns ``True`` if
+        at least one record was updated.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE transaction_history SET is_fraud = ? "
+                "WHERE customer_id = ? AND timestamp = ?",
+                (int(is_fraud), str(customer_id), int(timestamp)),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    # ── Reads ────────────────────────────────────────────────────────
+
+    def get(
+        self,
+        customer_id: str,
+        *,
+        before_timestamp: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return historical transactions for *customer_id*.
+
+        Only entries with ``timestamp < before_timestamp`` are returned
+        (temporal safety).  Results sorted by timestamp ascending.
+        """
+        with self._lock:
+            if before_timestamp is not None:
+                rows = self._conn.execute(
+                    "SELECT timestamp, amount, product_cd, addr1, addr2, "
+                    "device_type, id_19, id_20, has_identity_data, is_fraud "
+                    "FROM transaction_history "
+                    "WHERE customer_id = ? AND timestamp < ? "
+                    "ORDER BY timestamp ASC, id ASC",
+                    (str(customer_id), int(before_timestamp)),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT timestamp, amount, product_cd, addr1, addr2, "
+                    "device_type, id_19, id_20, has_identity_data, is_fraud "
+                    "FROM transaction_history "
+                    "WHERE customer_id = ? "
+                    "ORDER BY timestamp ASC, id ASC",
+                    (str(customer_id),),
+                ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def customer_count(self, customer_id: str) -> int:
+        """Return the number of stored entries for *customer_id*."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM transaction_history WHERE customer_id = ?",
+                (str(customer_id),),
+            ).fetchone()[0]
+
+    def total_count(self) -> int:
+        """Return total entries across all customers."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM transaction_history"
+            ).fetchone()[0]
+
+    def clear(self) -> None:
+        """Remove all stored history (useful in tests)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM transaction_history")
+            self._conn.commit()
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection."""
+        with self._lock:
+            self._conn.close()
+
+
 # ── Recording helper ────────────────────────────────────────────────
 
 
@@ -305,9 +516,10 @@ def record_transaction(
 
 # ── Module-level singleton ──────────────────────────────────────────
 
-history_store: InMemoryHistoryStore = InMemoryHistoryStore()
+history_store: InMemoryHistoryStore | SQLiteHistoryRepository = InMemoryHistoryStore()
 """Global history store instance shared across the ML service.
 
-Replace this with a database-backed :class:`CustomerHistoryRepository`
-implementation when persistent storage becomes available.
+Defaults to :class:`InMemoryHistoryStore`.  The ML API lifespan handler
+in ``ml/api/app.py`` replaces this with :class:`SQLiteHistoryRepository`
+when the SQLite database is writable.
 """

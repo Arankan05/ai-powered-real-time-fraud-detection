@@ -36,7 +36,12 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ml.features.engineer import engineer_features_for_inference
-from ml.features.history import history_store, record_transaction
+from ml.features.history import (
+    InMemoryHistoryStore,
+    SQLiteHistoryRepository,
+    record_transaction,
+)
+import ml.features.history as _history_module
 from ml.predict.bundle import model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
 
@@ -47,8 +52,10 @@ _predictor: FraudPredictor | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model at startup; release on shutdown."""
+    """Load model and initialise persistent history store; release on shutdown."""
     global _predictor
+
+    # ── Model ─────────────────────────────────────────────────────
     model_path = os.environ.get("ML_MODEL_PATH")
     try:
         _predictor = FraudPredictor(bundle_path=model_path)
@@ -56,8 +63,28 @@ async def lifespan(app: FastAPI):
     except (FileNotFoundError, KeyError) as exc:
         print(f"[ml-api] Model not available: {exc}")
         _predictor = None
+
+    # ── History store ─────────────────────────────────────────────
+    # Try SQLite (persistent); fall back to in-memory on failure.
+    db_path = os.environ.get("ML_HISTORY_DB_PATH", "data/ml_history.db")
+    sqlite_store: SQLiteHistoryRepository | None = None
+    try:
+        sqlite_store = SQLiteHistoryRepository(db_path=db_path)
+        _history_module.history_store = sqlite_store
+        print(f"[ml-api] History store: SQLite ({db_path})")
+    except Exception as exc:
+        print(f"[ml-api] SQLite history unavailable ({exc}); "
+              "falling back to in-memory store")
+
     yield
+
+    # ── Shutdown ──────────────────────────────────────────────────
     _predictor = None
+    if sqlite_store is not None:
+        try:
+            sqlite_store.close()
+        except Exception:
+            pass
 
 
 app = FastAPI(
@@ -226,9 +253,10 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
 
     # Convert raw transaction to 24 engineered features (with history)
     raw_data = request.model_dump()
+    _store = _history_module.history_store
     try:
         features_df = engineer_features_for_inference(
-            raw_data, history_store=history_store
+            raw_data, history_store=_store
         )
     except Exception as exc:
         raise HTTPException(
@@ -256,7 +284,7 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
     # Record transaction in history store for future lookups.
     # Best-effort: a recording failure must never block prediction.
     try:
-        record_transaction(history_store, raw_data)
+        record_transaction(_store, raw_data)
     except Exception:
         pass
 

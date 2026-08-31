@@ -27,6 +27,7 @@ from ml.features.engineer import engineer_features_for_inference, _resolve_custo
 from ml.features.history import (
     CustomerHistoryRepository,
     InMemoryHistoryStore,
+    SQLiteHistoryRepository,
     TransactionHistoryStore,
     TransactionRecord,
     record_transaction,
@@ -510,3 +511,192 @@ def test_resolve_customer_id_unknown():
 def test_resolve_customer_id_empty_string():
     """Empty-string customer_id is treated as missing."""
     assert _resolve_customer_id({"customer_id": "  ", "device_fingerprint": "fp"}) == "fp"
+
+
+# ── SQLiteHistoryRepository tests ────────────────────────────────────
+
+
+def _make_sqlite_store(tmp_path, **kwargs):
+    """Create a SQLiteHistoryRepository in a temp directory."""
+    return SQLiteHistoryRepository(
+        db_path=str(tmp_path / "test_history.db"), **kwargs
+    )
+
+
+def test_sqlite_basic_add_get(tmp_path):
+    """SQLite store: add and retrieve records."""
+    store = _make_sqlite_store(tmp_path)
+    store.add("c1", {"timestamp": 100, "amount": 50.0})
+    entries = store.get("c1")
+    assert len(entries) == 1
+    assert entries[0]["timestamp"] == 100
+    assert entries[0]["amount"] == 50.0
+    store.close()
+
+
+def test_sqlite_temporal_filtering(tmp_path):
+    """SQLite store: before_timestamp filters correctly."""
+    store = _make_sqlite_store(tmp_path)
+    store.add("c1", {"timestamp": 100, "amount": 10.0})
+    store.add("c1", {"timestamp": 200, "amount": 20.0})
+    store.add("c1", {"timestamp": 300, "amount": 30.0})
+    result = store.get("c1", before_timestamp=250)
+    assert len(result) == 2
+    assert result[0]["timestamp"] == 100
+    assert result[1]["timestamp"] == 200
+    store.close()
+
+
+def test_sqlite_unknown_customer(tmp_path):
+    """SQLite store: unknown customer returns empty list."""
+    store = _make_sqlite_store(tmp_path)
+    assert store.get("nonexistent") == []
+    store.close()
+
+
+def test_sqlite_record_outcome(tmp_path):
+    """SQLite store: record_outcome updates is_fraud label."""
+    store = _make_sqlite_store(tmp_path)
+    store.add("c1", {"timestamp": 100, "amount": 10.0, "is_fraud": 0})
+    updated = store.record_outcome("c1", 100, 1)
+    assert updated is True
+    entries = store.get("c1")
+    assert entries[0]["is_fraud"] == 1
+    store.close()
+
+
+def test_sqlite_record_outcome_not_found(tmp_path):
+    """SQLite store: record_outcome returns False for missing record."""
+    store = _make_sqlite_store(tmp_path)
+    assert store.record_outcome("c1", 999, 1) is False
+    store.close()
+
+
+def test_sqlite_fifo_eviction(tmp_path):
+    """SQLite store: max_per_customer evicts oldest."""
+    store = _make_sqlite_store(tmp_path, max_per_customer=3)
+    for i in range(5):
+        store.add("c1", {"timestamp": i, "amount": float(i)})
+    entries = store.get("c1")
+    assert len(entries) == 3
+    assert entries[0]["timestamp"] == 2  # oldest kept
+    store.close()
+
+
+def test_sqlite_clear(tmp_path):
+    """SQLite store: clear removes all data."""
+    store = _make_sqlite_store(tmp_path)
+    store.add("c1", {"timestamp": 100})
+    store.add("c2", {"timestamp": 200})
+    store.clear()
+    assert store.total_count() == 0
+    store.close()
+
+
+def test_sqlite_persistence(tmp_path):
+    """SQLite store: data survives reopening (persistence)."""
+    db_path = str(tmp_path / "persist.db")
+    store1 = SQLiteHistoryRepository(db_path=db_path)
+    store1.add("c1", {"timestamp": 100, "amount": 42.0})
+    store1.add("c1", {"timestamp": 200, "amount": 99.0})
+    store1.close()
+
+    # Re-open the same database
+    store2 = SQLiteHistoryRepository(db_path=db_path)
+    entries = store2.get("c1")
+    assert len(entries) == 2
+    assert entries[0]["amount"] == 42.0
+    assert entries[1]["amount"] == 99.0
+    store2.close()
+
+
+def test_sqlite_satisfies_protocol(tmp_path):
+    """SQLiteHistoryRepository satisfies CustomerHistoryRepository."""
+    store = _make_sqlite_store(tmp_path)
+    assert isinstance(store, CustomerHistoryRepository)
+    store.close()
+
+
+def test_sqlite_add_transaction_record(tmp_path):
+    """SQLite store: add() accepts TransactionRecord instances."""
+    store = _make_sqlite_store(tmp_path)
+    store.add("c1", TransactionRecord(timestamp=100, amount=50.0, addr2=840))
+    entries = store.get("c1")
+    assert len(entries) == 1
+    assert entries[0]["timestamp"] == 100
+    assert entries[0]["amount"] == 50.0
+    assert entries[0]["addr2"] == 840
+    store.close()
+
+
+def test_sqlite_record_transaction_helper(tmp_path):
+    """record_transaction works with SQLite store."""
+    store = _make_sqlite_store(tmp_path)
+    raw = {
+        "amount": 250.0,
+        "device_fingerprint": "fp_sql_1",
+        "timestamp": 5000,
+        "addr1": 100,
+        "addr2": 840,
+        "ProductCD": "W",
+    }
+    record_transaction(store, raw)
+    entries = store.get("fp_sql_1")
+    assert len(entries) == 1
+    assert entries[0]["amount"] == 250.0
+    assert entries[0]["timestamp"] == 5000
+    assert entries[0]["is_fraud"] == 0
+    store.close()
+
+
+def test_sqlite_customer_count(tmp_path):
+    """SQLite store: customer_count returns correct count."""
+    store = _make_sqlite_store(tmp_path)
+    store.add("c1", {"timestamp": 100})
+    store.add("c1", {"timestamp": 200})
+    store.add("c2", {"timestamp": 300})
+    assert store.customer_count("c1") == 2
+    assert store.customer_count("c2") == 1
+    assert store.customer_count("c3") == 0
+    assert store.total_count() == 3
+    store.close()
+
+
+def test_sqlite_feature_engineering_integration(tmp_path):
+    """Feature engineering with SQLite store produces valid features."""
+    store = _make_sqlite_store(tmp_path)
+    # Seed some history
+    store.add("cust_sql", {"timestamp": 100, "amount": 50.0, "addr2": 840})
+    store.add("cust_sql", {"timestamp": 200, "amount": 75.0, "addr2": 840})
+
+    raw = _base_raw()
+    raw["customer_id"] = "cust_sql"
+    raw["timestamp"] = 300
+    raw["amount"] = 100.0
+
+    result = engineer_features_for_inference(raw, history_store=store)
+    assert result.shape == (1, 24)
+    # velocity should reflect 2 historical transactions
+    assert result["tx_velocity_1h"].iloc[0] > 0
+    store.close()
+
+
+def test_sqlite_cold_start_matches_inmemory(tmp_path):
+    """Cold-start features are identical for SQLite and InMemory stores."""
+    mem_store = InMemoryHistoryStore()
+    sql_store = _make_sqlite_store(tmp_path)
+
+    raw = _base_raw()
+    raw["customer_id"] = "brand_new_customer"
+    raw["timestamp"] = 500
+
+    result_mem = engineer_features_for_inference(raw, history_store=mem_store)
+    result_sql = engineer_features_for_inference(raw, history_store=sql_store)
+
+    # Compare only numeric columns (device_fingerprint, etc. are strings)
+    numeric_cols = result_mem.select_dtypes(include="number").columns
+    np.testing.assert_array_almost_equal(
+        result_mem[numeric_cols].values.astype(float),
+        result_sql[numeric_cols].values.astype(float),
+    )
+    sql_store.close()

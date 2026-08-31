@@ -26,7 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ml.api.app import app, _predictor
-from ml.features.history import history_store
+import ml.features.history as _history_module
 
 # ── Valid raw transaction fixture ─────────────────────────────────────
 
@@ -34,9 +34,9 @@ from ml.features.history import history_store
 @pytest.fixture(autouse=True)
 def _clear_history():
     """Clear history store before each test for isolation."""
-    history_store.clear()
+    _history_module.history_store.clear()
     yield
-    history_store.clear()
+    _history_module.history_store.clear()
 
 
 def _valid_raw_transaction() -> dict:
@@ -263,9 +263,9 @@ def test_history_recorded(client: TestClient):
     """Prediction records transaction in history store."""
     if not _model_available(client):
         pytest.skip("Model not available")
-    history_store.clear()
+    _history_module.history_store.clear()
     client.post("/predict", json=_valid_raw_transaction())
-    assert history_store.total_count() >= 1
+    assert _history_module.history_store.total_count() >= 1
 
 
 # ── Additional: valid with optional fields ────────────────────────────
