@@ -45,6 +45,7 @@ from ml.features.history import (
 import ml.features.history as _history_module
 from ml.predict.bundle import model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
+from ml.risk.aggregator import aggregate_risk
 from ml.rules.engine import evaluate_rules
 
 # ── Lifespan: load model once at startup ──────────────────────────────
@@ -321,35 +322,6 @@ class HealthResponse(BaseModel):
     features: int | None = Field(None, description="Number of model features")
 
 
-# ── Risk aggregation weights (architecture §5) ──────────────────────
-
-_W_ML = float(os.environ.get("ML_WEIGHT_ML", "0.50"))
-_W_BEHAVIOUR = float(os.environ.get("ML_WEIGHT_BEHAVIOUR", "0.30"))
-_W_RULE = float(os.environ.get("ML_WEIGHT_RULE", "0.20"))
-
-_RISK_THRESHOLDS = [
-    (70, "HIGH", "HOLD"),
-    (30, "MEDIUM", "VERIFY"),
-    (0, "LOW", "APPROVE"),
-]
-
-
-def _compute_risk(
-    ml_score: int, behaviour_score: int, rule_score: int
-) -> tuple[int, str, str]:
-    """Aggregate scores and determine risk level / decision."""
-    raw = (
-        _W_ML * ml_score
-        + _W_BEHAVIOUR * behaviour_score
-        + _W_RULE * rule_score
-    )
-    risk_score = int(max(0, min(round(raw), 100)))
-    for threshold, level, decision in _RISK_THRESHOLDS:
-        if risk_score > threshold:
-            return risk_score, level, decision
-    return risk_score, "LOW", "APPROVE"
-
-
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 
@@ -430,12 +402,11 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             for f in result.explanation
         ]
 
-    # Compute risk scores (architecture §5)
-    ml_score = int(round(result.fraud_probability * 100))
-    behaviour_score = rule_result.behaviour_score
-    rule_score = rule_result.rule_score
-    risk_score, risk_level, decision = _compute_risk(
-        ml_score, behaviour_score, rule_score
+    # Compute risk scores via the dedicated aggregator (architecture §5)
+    assessment = aggregate_risk(
+        fraud_probability=result.fraud_probability,
+        behaviour_score=rule_result.behaviour_score,
+        rule_score=rule_result.rule_score,
     )
 
     # Build structured explanation (architecture §6)
@@ -483,12 +454,12 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         model_version=result.model_version,
         explanation=factors,
         timestamp=raw_data.get("timestamp"),
-        ml_score=ml_score,
-        behaviour_score=behaviour_score,
-        rule_score=rule_score,
-        risk_score=risk_score,
-        risk_level=risk_level,
-        decision=decision,
+        ml_score=assessment.ml_score,
+        behaviour_score=assessment.behaviour_score,
+        rule_score=assessment.rule_score,
+        risk_score=assessment.risk_score,
+        risk_level=assessment.risk_level,
+        decision=assessment.decision,
         explanation_detail=explanation_detail,
         risk_factors=unique_factors if unique_factors else None,
     )

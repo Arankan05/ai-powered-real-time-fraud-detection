@@ -1076,12 +1076,12 @@ class TestBackendPassThrough:
         assert parsed.risk_level == "HIGH"
         assert parsed.decision == "HOLD"
 
-        # Verify explanation_detail is accessible
-        expl_detail = getattr(parsed, "explanation_detail", None)
+        # Verify explanation_detail is accessible as a typed MLExplanation model
+        expl_detail = parsed.explanation_detail
         assert expl_detail is not None
-        assert isinstance(expl_detail, dict)
-        assert len(expl_detail["behaviour_signals"]) == 1
-        assert len(expl_detail["rules_triggered"]) == 1
+        assert isinstance(expl_detail, MLExplanation)
+        assert len(expl_detail.behaviour_signals) == 1
+        assert len(expl_detail.rules_triggered) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════

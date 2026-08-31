@@ -89,6 +89,9 @@ class MLPredictionResponse(BaseModel):
     decision: str | None = None
     risk_factors: list[str] | None = None
 
+    # Structured explanation (architecture §6)
+    explanation_detail: MLExplanation | None = None
+
     model_config = ConfigDict(extra="allow")
 
 
