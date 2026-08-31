@@ -496,6 +496,8 @@ def record_transaction(
         return default if v is None else str(v)
 
     pc = _str("ProductCD", None) or _str("merchant_category", "W")
+    # DeviceType (dataset convention) with device_type fallback (backend convention)
+    dt = _str("DeviceType", None) or _str("device_type", None)
 
     store.add(
         customer_id,
@@ -505,7 +507,7 @@ def record_transaction(
             product_cd=pc,
             addr1=_int("addr1", -1),
             addr2=_int("addr2", -1),
-            device_type=_str("DeviceType", None),
+            device_type=dt,
             id_19=_str("id_19", None),
             id_20=_str("id_20", None),
             has_identity_data=_int("has_identity_data", 0),

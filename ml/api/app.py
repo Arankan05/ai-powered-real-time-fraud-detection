@@ -29,6 +29,7 @@ Environment:
 from __future__ import annotations
 
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -253,6 +254,12 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
 
     # Convert raw transaction to 24 engineered features (with history)
     raw_data = request.model_dump()
+
+    # Auto-generate timestamp when backend does not provide one so that
+    # historical velocity features can accumulate across requests.
+    if not raw_data.get("timestamp"):
+        raw_data["timestamp"] = int(time.time())
+
     _store = _history_module.history_store
     try:
         features_df = engineer_features_for_inference(

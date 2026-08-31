@@ -331,7 +331,7 @@ def engineer_features_for_inference(
     addr2 = _int_or("addr2", -1)
     id_19 = _str_or("id_19", None)
     id_20 = _str_or("id_20", None)
-    device_type = _str_or("DeviceType", None)
+    device_type = _str_or("DeviceType", None) or _str_or("device_type", None)
     product_cd = _str_or("ProductCD", None) or _str_or("merchant_category", "W")
     has_identity = _int_or("has_identity_data", 0)
     amount = float(raw["amount"])
