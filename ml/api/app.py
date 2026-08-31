@@ -105,6 +105,13 @@ class FeatureInput(BaseModel):
         return v
 
 
+class FactorOutput(BaseModel):
+    """Single SHAP feature attribution."""
+
+    feature: str = Field(..., description="Feature name")
+    importance: float = Field(..., description="SHAP contribution value")
+
+
 class PredictionResponse(BaseModel):
     """Response from the /predict endpoint."""
 
@@ -112,6 +119,10 @@ class PredictionResponse(BaseModel):
     fraud_prediction: int = Field(..., description="Binary prediction (0=legit, 1=fraud)")
     threshold: float = Field(..., description="Decision threshold used")
     model_version: str = Field(..., description="Model version string")
+    explanation: list[FactorOutput] | None = Field(
+        None,
+        description="Top SHAP feature attributions (sorted by |importance| desc)",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -130,6 +141,8 @@ def predict(request: FeatureInput) -> PredictionResponse:
     """Score a single transaction for fraud.
 
     Requires a loaded model.  Returns 503 if the model is unavailable.
+    The response always includes ``explanation`` with SHAP feature
+    attributions when the model supports it.
     """
     if _predictor is None:
         raise HTTPException(
@@ -142,18 +155,27 @@ def predict(request: FeatureInput) -> PredictionResponse:
     df = pd.DataFrame([data])
 
     try:
-        result: PredictionResult = _predictor.predict(df)
+        result: PredictionResult = _predictor.predict(df, explain=True)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         )
 
+    # Build explanation list for response
+    factors = None
+    if result.explanation is not None:
+        factors = [
+            FactorOutput(feature=f["feature"], importance=f["importance"])
+            for f in result.explanation
+        ]
+
     return PredictionResponse(
         fraud_probability=result.fraud_probability,
         fraud_prediction=result.fraud_prediction,
         threshold=result.threshold,
         model_version=result.model_version,
+        explanation=factors,
     )
 
 

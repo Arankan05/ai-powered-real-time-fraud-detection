@@ -7,7 +7,8 @@ Loads a :class:`ModelBundle` (once) and provides a stateless
   2. Applies the fitted preprocessing pipeline (StandardScaler + LabelEncoder).
   3. Runs the XGBoost model to produce fraud probabilities.
   4. Applies the tuned decision threshold (0.50) for binary prediction.
-  5. Returns both probability and prediction.
+  5. Optionally computes SHAP-based feature explanations.
+  6. Returns probability, prediction, and optional explanation.
 
 The prediction function does **not** retrain, refit, or modify the model.
 It is safe to call repeatedly and concurrently.
@@ -32,6 +33,17 @@ import pandas as pd
 from ml.models.baseline import apply_preprocessing
 from ml.predict.bundle import ModelBundle, load_bundle
 
+# ── Lazy SHAP import ──────────────────────────────────────────────────
+# SHAP is imported lazily so the prediction pipeline works even when
+# SHAP is not installed (e.g. lightweight inference environments).
+
+
+def _lazy_explainer(bundle: ModelBundle):
+    """Construct a FraudExplainer, importing SHAP on demand."""
+    from ml.explainability.explainer import FraudExplainer
+
+    return FraudExplainer(bundle)
+
 # ── Forbidden columns ─────────────────────────────────────────────────
 
 _FORBIDDEN_INPUT_COLS = frozenset({"isFraud", "TransactionID"})
@@ -49,12 +61,14 @@ class PredictionResult:
         fraud_prediction: Binary label (0 = legitimate, 1 = fraud).
         threshold: Decision threshold used.
         model_version: Version string of the model used.
+        explanation: Optional list of SHAP feature attributions.
     """
 
     fraud_probability: float
     fraud_prediction: int
     threshold: float
     model_version: str
+    explanation: list[dict[str, Any]] | None = None
 
 
 # ── Predictor ─────────────────────────────────────────────────────────
@@ -74,6 +88,8 @@ class FraudPredictor:
     def __init__(self, bundle_path: str | Path | None = None) -> None:
         self._bundle: ModelBundle = load_bundle(bundle_path)
         self._feature_set: set[str] = set(self._bundle.feature_names)
+        # Lazily initialised SHAP explainer (constructed on first use)
+        self._explainer = None
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -95,16 +111,24 @@ class FraudPredictor:
 
     # ── Prediction ────────────────────────────────────────────────────
 
-    def predict(self, features: pd.DataFrame) -> PredictionResult:
+    def predict(
+        self,
+        features: pd.DataFrame,
+        *,
+        explain: bool = False,
+    ) -> PredictionResult:
         """Run fraud prediction on a single transaction.
 
         Args:
             features: A single-row DataFrame with the 24 engineered
                       features (columns must match
                       ``ModelBundle.feature_names``).
+            explain: If ``True``, compute SHAP feature attributions
+                     and include them in the result.
 
         Returns:
-            :class:`PredictionResult` with probability and prediction.
+            :class:`PredictionResult` with probability, prediction,
+            and optional explanation.
 
         Raises:
             ValueError: If input validation fails (missing columns,
@@ -124,11 +148,17 @@ class FraudPredictor:
         # Binary prediction via threshold
         pred = 1 if prob >= self._bundle.threshold else 0
 
+        # Optional SHAP explanation
+        explanation = None
+        if explain:
+            explanation = self._compute_explanation(X_transformed)
+
         return PredictionResult(
             fraud_probability=prob,
             fraud_prediction=pred,
             threshold=self._bundle.threshold,
             model_version=self._bundle.model_version,
+            explanation=explanation,
         )
 
     def predict_batch(self, features: pd.DataFrame) -> list[PredictionResult]:
@@ -158,6 +188,18 @@ class FraudPredictor:
                 )
             )
         return results
+
+    # ── SHAP explanation ──────────────────────────────────────────────
+
+    def _compute_explanation(
+        self, X_transformed: np.ndarray
+    ) -> list[dict[str, Any]]:
+        """Compute SHAP values for a single preprocessed input."""
+        if self._explainer is None:
+            self._explainer = _lazy_explainer(self._bundle)
+        return self._explainer.explain(
+            X_transformed, self._bundle.feature_names
+        )
 
     # ── Validation ────────────────────────────────────────────────────
 
