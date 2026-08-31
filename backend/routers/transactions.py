@@ -149,6 +149,7 @@ async def create_transaction(request: TransactionCreate) -> TransactionResponse:
         explanation=explanation,
         risk_factors=ml_result.risk_factors,
         model_version=ml_result.model_version,
+        timestamp=ml_result.timestamp,
     )
 
 

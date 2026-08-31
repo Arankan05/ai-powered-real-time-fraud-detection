@@ -47,6 +47,7 @@ class MLBehaviourSignal(BaseModel):
 
     signal: str
     severity: float
+    reason: str | None = None
 
 
 class MLRuleTrigger(BaseModel):
@@ -54,6 +55,7 @@ class MLRuleTrigger(BaseModel):
 
     rule: str
     contribution: int
+    reason: str | None = None
 
 
 class MLExplanation(BaseModel):
@@ -67,20 +69,17 @@ class MLExplanation(BaseModel):
 class MLPredictionResponse(BaseModel):
     """Response from the ML/Fraud Intelligence Service ``POST /predict``.
 
-    Matches the schema in ``docs/ml-architecture.md`` L84–L106.
-    The ML service may return a subset of these fields depending
-    on implementation stage (currently returns probability/prediction/
-    threshold/model_version/explanation).
+    Matches the ML service ``PredictionResponse`` schema defined in
+    ``docs/ml-architecture.md`` and ``ml/api/app.py``.
+    All fields are optional to support partial ML service versions.
     """
 
-    # Current ML service fields
     fraud_probability: float | None = None
     fraud_prediction: int | None = None
     threshold: float | None = None
     model_version: str | None = None
+    timestamp: int | None = None
     explanation: list[MLFactor] | None = None
-
-    # Future full-service fields (when behaviour + rules are added)
     ml_score: int | None = None
     behaviour_score: int | None = None
     rule_score: int | None = None
@@ -88,8 +87,6 @@ class MLPredictionResponse(BaseModel):
     risk_level: str | None = None
     decision: str | None = None
     risk_factors: list[str] | None = None
-
-    # Structured explanation (architecture §6)
     explanation_detail: MLExplanation | None = None
 
     model_config = ConfigDict(extra="allow")
@@ -127,6 +124,7 @@ class TransactionResponse(BaseModel):
     model_version: str | None = None
     fraud_probability: float | None = None
     fraud_prediction: int | None = None
+    timestamp: int | None = None
 
 
 # ── Outcome feedback ──────────────────────────────────────────────────
