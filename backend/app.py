@@ -11,6 +11,7 @@ Run locally::
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -19,6 +20,8 @@ from fastapi import FastAPI
 from backend.config import get_settings
 from backend.routers.transactions import router as transactions_router, set_ml_client
 from backend.services.ml_client import MLServiceClient
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -31,8 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=float(settings.ML_REQUEST_TIMEOUT_SECONDS),
     )
     set_ml_client(client)
-    print(f"[backend] ML client → {settings.ML_SERVICE_URL} "
-          f"(timeout {settings.ML_REQUEST_TIMEOUT_SECONDS}s)")
+    logger.info("ML client configured (timeout %ds)", settings.ML_REQUEST_TIMEOUT_SECONDS)
     yield
 
 

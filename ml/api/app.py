@@ -28,6 +28,7 @@ Environment:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -48,6 +49,8 @@ from ml.predict.predictor import FraudPredictor, PredictionResult
 from ml.risk.aggregator import aggregate_risk
 from ml.rules.engine import evaluate_rules
 
+logger = logging.getLogger(__name__)
+
 # ── Lifespan: load model once at startup ──────────────────────────────
 
 _predictor: FraudPredictor | None = None
@@ -62,9 +65,9 @@ async def lifespan(app: FastAPI):
     model_path = os.environ.get("ML_MODEL_PATH")
     try:
         _predictor = FraudPredictor(bundle_path=model_path)
-        print(f"[ml-api] Model loaded: {_predictor.model_version}")
+        logger.info("Model loaded: %s", _predictor.model_version)
     except (FileNotFoundError, KeyError) as exc:
-        print(f"[ml-api] Model not available: {exc}")
+        logger.warning("Model not available: %s", exc)
         _predictor = None
 
     # ── History store ─────────────────────────────────────────────
@@ -74,10 +77,9 @@ async def lifespan(app: FastAPI):
     try:
         sqlite_store = SQLiteHistoryRepository(db_path=db_path)
         _history_module.history_store = sqlite_store
-        print(f"[ml-api] History store: SQLite ({db_path})")
+        logger.info("History store: SQLite")
     except Exception as exc:
-        print(f"[ml-api] SQLite history unavailable ({exc}); "
-              "falling back to in-memory store")
+        logger.warning("SQLite history unavailable (%s); using in-memory store", exc)
 
     yield
 
@@ -320,6 +322,9 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="'ready' or 'model_unavailable'")
     model_version: str | None = Field(None, description="Loaded model version")
     features: int | None = Field(None, description="Number of model features")
+    history_store: str | None = Field(
+        None, description="History store type ('sqlite' or 'in_memory')"
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────
@@ -388,6 +393,7 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         rule_result = evaluate_rules(features_df, raw_data, history_records)
     except Exception:
         # Rule evaluation must never block prediction — fall back to empty.
+        logger.warning("Rule evaluation failed; falling back to empty result", exc_info=True)
         from ml.rules.engine import RuleResult
         rule_result = RuleResult(
             rule_score=0, behaviour_score=0,
@@ -445,7 +451,12 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
     try:
         record_transaction(_store, raw_data)
     except Exception:
-        pass
+        logger.warning("Failed to record transaction in history", exc_info=True)
+
+    logger.info(
+        "Prediction complete: model=%s risk=%s decision=%s",
+        result.model_version, assessment.risk_level, assessment.decision,
+    )
 
     return PredictionResponse(
         fraud_probability=result.fraud_probability,
@@ -483,6 +494,7 @@ def update_outcome(request: OutcomeUpdateRequest) -> OutcomeUpdateResponse:
             is_fraud=request.is_fraud,
         )
     except Exception:
+        logger.error("Failed to update outcome", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update outcome.",
@@ -494,6 +506,8 @@ def update_outcome(request: OutcomeUpdateRequest) -> OutcomeUpdateResponse:
             detail="Transaction record not found for the given customer_id and timestamp.",
         )
 
+    logger.info("Outcome updated: is_fraud=%s", request.is_fraud)
+
     return OutcomeUpdateResponse(
         updated=True,
         customer_id=request.customer_id,
@@ -504,11 +518,18 @@ def update_outcome(request: OutcomeUpdateRequest) -> OutcomeUpdateResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Service health check — reports model availability."""
+    """Service health check — reports model and history store status."""
+    store = _history_module.history_store
+    store_type = (
+        "sqlite"
+        if isinstance(store, SQLiteHistoryRepository)
+        else "in_memory"
+    )
     if _predictor is None:
-        return HealthResponse(status="model_unavailable")
+        return HealthResponse(status="model_unavailable", history_store=store_type)
     return HealthResponse(
         status="ready",
         model_version=_predictor.model_version,
         features=len(_predictor.feature_names),
+        history_store=store_type,
     )
