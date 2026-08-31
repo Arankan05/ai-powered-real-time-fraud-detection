@@ -27,10 +27,10 @@ function AppRoutes() {
         <Route path="/register" element={<RegisterPage />} />
       </Route>
 
-      {/* Customer routes */}
+      {/* Customer routes — only accessible by customers */}
       <Route
         element={
-          <ProtectedRoute>
+          <ProtectedRoute allowedRoles={['customer']}>
             <CustomerLayout />
           </ProtectedRoute>
         }
@@ -40,10 +40,10 @@ function AppRoutes() {
         <Route path="/customer/transactions/:id" element={<TransactionDetailPage />} />
       </Route>
 
-      {/* Analyst routes */}
+      {/* Analyst routes — accessible by fraud analysts and admins */}
       <Route
         element={
-          <ProtectedRoute>
+          <ProtectedRoute allowedRoles={['fraud_analyst', 'admin']}>
             <AnalystLayout />
           </ProtectedRoute>
         }
