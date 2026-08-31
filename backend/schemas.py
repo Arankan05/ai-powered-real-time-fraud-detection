@@ -124,3 +124,32 @@ class TransactionResponse(BaseModel):
     model_version: str | None = None
     fraud_probability: float | None = None
     fraud_prediction: int | None = None
+
+
+# ── Outcome feedback ──────────────────────────────────────────────────
+
+
+class OutcomeUpdate(BaseModel):
+    """Request to update a transaction's fraud outcome (label feedback loop)."""
+
+    customer_id: str = Field(
+        ..., min_length=1, max_length=255,
+        description="Customer identifier",
+    )
+    timestamp: int = Field(
+        ..., ge=0,
+        description="Transaction timestamp (from prediction response)",
+    )
+    is_fraud: int = Field(
+        ..., ge=0, le=1,
+        description="Confirmed fraud label (0=legitimate, 1=fraudulent)",
+    )
+
+
+class OutcomeResponse(BaseModel):
+    """Response from the outcome update endpoint."""
+
+    updated: bool = Field(..., description="Whether the record was found and updated")
+    customer_id: str = Field(..., description="Customer identifier")
+    timestamp: int = Field(..., description="Transaction timestamp that was updated")
+    is_fraud: int = Field(..., description="New fraud label value")

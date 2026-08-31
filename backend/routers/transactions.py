@@ -21,6 +21,8 @@ from fastapi import APIRouter, HTTPException, status
 from backend.schemas import (
     MLExplanation,
     MLPredictionResponse,
+    OutcomeResponse,
+    OutcomeUpdate,
     TransactionCreate,
     TransactionResponse,
 )
@@ -154,3 +156,63 @@ def _build_ml_payload(request: TransactionCreate) -> dict[str, Any]:
     will be added here as ``customer_id`` and ``customer_history``.
     """
     return request.model_dump()
+
+
+# ── Outcome feedback endpoint ─────────────────────────────────────────
+
+
+@router.patch(
+    "/transactions/outcome",
+    response_model=OutcomeResponse,
+)
+async def update_transaction_outcome(
+    request: OutcomeUpdate,
+) -> OutcomeResponse:
+    """Update the fraud outcome of a previously recorded transaction.
+
+    Used for the label feedback loop — after a transaction is later
+    confirmed as fraudulent or legitimate, this endpoint forwards the
+    update to the ML / Fraud Intelligence Service.
+
+    Returns 404 if the target transaction cannot be found.
+    """
+    client = get_ml_client()
+
+    payload = {
+        "customer_id": request.customer_id,
+        "timestamp": request.timestamp,
+        "is_fraud": request.is_fraud,
+    }
+
+    try:
+        result = await client.update_outcome(payload)
+    except MLServiceUnavailableError as exc:
+        logger.error("ML service unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ML fraud detection service is unavailable.",
+        )
+    except MLServiceTimeoutError as exc:
+        logger.error("ML service timeout: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ML fraud detection service timed out.",
+        )
+    except MLServiceResponseError as exc:
+        if exc.status_code == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Transaction record not found.",
+            )
+        logger.error("ML service error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="ML outcome update returned an error.",
+        )
+
+    return OutcomeResponse(
+        updated=result.get("updated", True),
+        customer_id=result.get("customer_id", request.customer_id),
+        timestamp=result.get("timestamp", request.timestamp),
+        is_fraud=result.get("is_fraud", request.is_fraud),
+    )

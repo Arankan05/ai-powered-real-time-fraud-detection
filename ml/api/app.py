@@ -223,6 +223,36 @@ class PredictionResponse(BaseModel):
         None,
         description="Top SHAP feature attributions (sorted by |importance| desc)",
     )
+    timestamp: int | None = Field(
+        None,
+        description="Transaction timestamp used (for outcome feedback reference)",
+    )
+
+
+class OutcomeUpdateRequest(BaseModel):
+    """Request to update the fraud outcome of a previously recorded transaction."""
+
+    customer_id: str = Field(
+        ..., min_length=1, max_length=255,
+        description="Customer identifier used when the transaction was recorded",
+    )
+    timestamp: int = Field(
+        ..., ge=0,
+        description="Transaction timestamp (as returned in the prediction response)",
+    )
+    is_fraud: int = Field(
+        ..., ge=0, le=1,
+        description="Confirmed fraud label (0=legitimate, 1=fraudulent)",
+    )
+
+
+class OutcomeUpdateResponse(BaseModel):
+    """Response from the /outcome endpoint."""
+
+    updated: bool = Field(..., description="Whether the record was found and updated")
+    customer_id: str = Field(..., description="Customer identifier")
+    timestamp: int = Field(..., description="Transaction timestamp that was updated")
+    is_fraud: int = Field(..., description="New fraud label value")
 
 
 class HealthResponse(BaseModel):
@@ -301,6 +331,44 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         threshold=result.threshold,
         model_version=result.model_version,
         explanation=factors,
+        timestamp=raw_data.get("timestamp"),
+    )
+
+
+@app.post("/outcome", response_model=OutcomeUpdateResponse)
+def update_outcome(request: OutcomeUpdateRequest) -> OutcomeUpdateResponse:
+    """Update the fraud outcome of a previously recorded transaction.
+
+    Used for the label feedback loop: after a transaction is later
+    confirmed as fraudulent or legitimate, this endpoint updates the
+    stored history record so future predictions use the correct label.
+
+    Returns 404 if the target transaction cannot be found.
+    """
+    _store = _history_module.history_store
+    try:
+        updated = _store.record_outcome(
+            customer_id=request.customer_id,
+            timestamp=request.timestamp,
+            is_fraud=request.is_fraud,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update outcome.",
+        )
+
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transaction record not found for the given customer_id and timestamp.",
+        )
+
+    return OutcomeUpdateResponse(
+        updated=True,
+        customer_id=request.customer_id,
+        timestamp=request.timestamp,
+        is_fraud=request.is_fraud,
     )
 
 

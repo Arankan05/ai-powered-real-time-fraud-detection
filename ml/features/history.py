@@ -149,6 +149,18 @@ class CustomerHistoryRepository(Protocol):
         """Record a transaction for *customer_id*."""
         ...
 
+    def record_outcome(
+        self,
+        customer_id: str,
+        timestamp: int,
+        is_fraud: int,
+    ) -> bool:
+        """Update ``is_fraud`` for a previously recorded transaction.
+
+        Returns ``True`` if the record was found and updated.
+        """
+        ...
+
 
 # ── In-memory implementation ────────────────────────────────────────
 

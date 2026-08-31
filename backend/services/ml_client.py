@@ -137,6 +137,62 @@ class MLServiceClient:
                 f"Invalid ML response body: {exc}",
             ) from exc
 
+    async def update_outcome(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update a transaction outcome via the ML service.
+
+        Args:
+            payload: Dict with ``customer_id``, ``timestamp``, ``is_fraud``.
+
+        Returns:
+            Parsed response dict from the ML service.
+
+        Raises:
+            MLServiceUnavailableError: Connection refused / DNS failure.
+            MLServiceTimeoutError: Request timed out.
+            MLServiceResponseError: Non-2xx status or invalid body.
+        """
+        url = f"{self._base_url}/outcome"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.post(url, json=payload)
+        except httpx.ConnectError as exc:
+            logger.error("ML service connection refused: %s", exc)
+            raise MLServiceUnavailableError(
+                f"Cannot connect to ML service at {self._base_url}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            logger.error("ML service timeout after %ss: %s", self._timeout, exc)
+            raise MLServiceTimeoutError(
+                f"ML service timed out after {self._timeout}s"
+            ) from exc
+        except httpx.HTTPError as exc:
+            logger.error("ML service HTTP error: %s", exc)
+            raise MLServiceUnavailableError(
+                f"ML service HTTP error: {exc}"
+            ) from exc
+
+        if response.status_code == 404:
+            detail = _safe_detail(response)
+            raise MLServiceResponseError(404, detail or "Transaction not found")
+        if response.status_code >= 400:
+            detail = _safe_detail(response)
+            raise MLServiceResponseError(
+                response.status_code,
+                detail or f"Unexpected status {response.status_code}",
+            )
+
+        try:
+            return response.json()
+        except (ValueError, KeyError) as exc:
+            logger.error("ML service returned invalid response: %s", exc)
+            raise MLServiceResponseError(
+                response.status_code,
+                f"Invalid outcome response body: {exc}",
+            ) from exc
+
     async def health(self) -> dict[str, Any]:
         """Check ML service health.
 
