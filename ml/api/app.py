@@ -36,7 +36,7 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ml.features.engineer import engineer_features_for_inference
-from ml.features.history import history_store
+from ml.features.history import history_store, record_transaction
 from ml.predict.bundle import model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
 
@@ -253,38 +253,11 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             for f in result.explanation
         ]
 
-    # Record transaction in history store for future lookups
+    # Record transaction in history store for future lookups.
+    # Best-effort: a recording failure must never block prediction.
     try:
-        from ml.features.engineer import _resolve_customer_id
-
-        cid = _resolve_customer_id(raw_data)
-
-        def _h_int(key: str, default: int) -> int:
-            v = raw_data.get(key)
-            return default if v is None else int(v)
-
-        def _h_str(key: str, default: str | None) -> str | None:
-            v = raw_data.get(key)
-            return default if v is None else str(v)
-
-        pc = _h_str("ProductCD", None) or _h_str("merchant_category", "W")
-        history_store.add(
-            cid,
-            {
-                "timestamp": _h_int("timestamp", 0),
-                "amount": float(raw_data["amount"]),
-                "product_cd": pc,
-                "addr1": _h_int("addr1", -1),
-                "addr2": _h_int("addr2", -1),
-                "device_type": _h_str("DeviceType", None),
-                "id_19": _h_str("id_19", None),
-                "id_20": _h_str("id_20", None),
-                "has_identity_data": _h_int("has_identity_data", 0),
-                "is_fraud": 0,  # unknown at prediction time
-            },
-        )
+        record_transaction(history_store, raw_data)
     except Exception:
-        # History recording is best-effort — never block prediction
         pass
 
     return PredictionResponse(

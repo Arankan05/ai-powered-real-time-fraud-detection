@@ -23,8 +23,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ml.features.engineer import engineer_features_for_inference
-from ml.features.history import TransactionHistoryStore
+from ml.features.engineer import engineer_features_for_inference, _resolve_customer_id
+from ml.features.history import (
+    CustomerHistoryRepository,
+    InMemoryHistoryStore,
+    TransactionHistoryStore,
+    TransactionRecord,
+    record_transaction,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -397,3 +403,110 @@ def test_store_clear():
     store.add("c1", {"timestamp": 100})
     store.clear()
     assert store.total_count() == 0
+
+
+# ── TransactionRecord dataclass tests ────────────────────────────────
+
+
+def test_transaction_record_defaults():
+    """TransactionRecord has safe cold-start defaults."""
+    rec = TransactionRecord()
+    assert rec.timestamp == 0
+    assert rec.amount == 0.0
+    assert rec.product_cd is None
+    assert rec.is_fraud == 0
+    assert rec.has_identity_data == 0
+
+
+def test_transaction_record_to_dict():
+    """to_dict() produces a plain dict with all fields."""
+    rec = TransactionRecord(timestamp=500, amount=99.9, addr2=840)
+    d = rec.to_dict()
+    assert isinstance(d, dict)
+    assert d["timestamp"] == 500
+    assert d["amount"] == 99.9
+    assert d["addr2"] == 840
+    assert d["is_fraud"] == 0
+
+
+def test_store_add_transaction_record():
+    """InMemoryHistoryStore.add() accepts TransactionRecord instances."""
+    store = InMemoryHistoryStore()
+    store.add("c1", TransactionRecord(timestamp=100, amount=50.0))
+    entries = store.get("c1")
+    assert len(entries) == 1
+    assert entries[0]["timestamp"] == 100
+    assert entries[0]["amount"] == 50.0
+
+
+# ── record_transaction helper ───────────────────────────────────────
+
+
+def test_record_transaction_basic():
+    """record_transaction extracts fields and stores them."""
+    store = InMemoryHistoryStore()
+    raw = {
+        "amount": 250.0,
+        "device_fingerprint": "fp_rec_1",
+        "timestamp": 5000,
+        "addr1": 100,
+        "addr2": 840,
+        "ProductCD": "W",
+    }
+    record_transaction(store, raw)
+    entries = store.get("fp_rec_1")
+    assert len(entries) == 1
+    assert entries[0]["amount"] == 250.0
+    assert entries[0]["timestamp"] == 5000
+    assert entries[0]["addr2"] == 840
+    assert entries[0]["is_fraud"] == 0  # unknown at prediction time
+
+
+def test_record_transaction_explicit_customer_id():
+    """record_transaction uses explicit customer_id when provided."""
+    store = InMemoryHistoryStore()
+    raw = {"amount": 10.0, "device_fingerprint": "fp_x", "timestamp": 100}
+    record_transaction(store, raw, customer_id="explicit_cust")
+    assert store.customer_count("explicit_cust") == 1
+    assert store.customer_count("fp_x") == 0
+
+
+def test_record_transaction_no_timestamp():
+    """record_transaction defaults timestamp to 0 when absent."""
+    store = InMemoryHistoryStore()
+    raw = {"amount": 50.0, "device_fingerprint": "fp_nt"}
+    record_transaction(store, raw)
+    entries = store.get("fp_nt")
+    assert entries[0]["timestamp"] == 0
+
+
+# ── Protocol satisfaction ───────────────────────────────────────────
+
+
+def test_inmemory_store_satisfies_protocol():
+    """InMemoryHistoryStore satisfies CustomerHistoryRepository protocol."""
+    store = InMemoryHistoryStore()
+    assert isinstance(store, CustomerHistoryRepository)
+
+
+# ── Customer identification ─────────────────────────────────────────
+
+
+def test_resolve_customer_id_explicit():
+    """Explicit customer_id takes priority."""
+    assert _resolve_customer_id({"customer_id": "c1", "device_fingerprint": "fp"}) == "c1"
+
+
+def test_resolve_customer_id_fallback():
+    """Falls back to device_fingerprint when no customer_id."""
+    assert _resolve_customer_id({"device_fingerprint": "fp123"}) == "fp123"
+
+
+def test_resolve_customer_id_unknown():
+    """Falls back to 'unknown' when neither field present."""
+    assert _resolve_customer_id({}) == "unknown"
+
+
+def test_resolve_customer_id_empty_string():
+    """Empty-string customer_id is treated as missing."""
+    assert _resolve_customer_id({"customer_id": "  ", "device_fingerprint": "fp"}) == "fp"
