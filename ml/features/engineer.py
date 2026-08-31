@@ -267,6 +267,96 @@ def engineer_features(
     }
 
 
+# ── Single-transaction inference ────────────────────────────────────
+
+
+def engineer_features_for_inference(
+    raw: dict[str, Any],
+) -> pd.DataFrame:
+    """Compute the 24 engineered features for a **single** raw transaction.
+
+    Historical features that require prior transactions receive
+    cold-start defaults as documented in :mod:`ml.features.historical`
+    (lines 8-19).  ``previous_suspicious_count`` is set to 0
+    (no prior fraud history) without accessing the ``isFraud`` label.
+
+    Args:
+        raw: Dict with keys matching the raw transaction payload
+             sent by the backend (``TransactionCreate.model_dump()``).
+             Optional: ``timestamp``, ``card1``, ``addr1``, ``addr2``,
+             ``id_19``, ``id_20``, ``DeviceType``, ``has_identity_data``.
+
+    Returns:
+        Single-row :class:`pandas.DataFrame` with columns matching
+        :data:`FEATURE_LIST` in the correct order.
+    """
+    # -- defaults for optional raw fields --------------------------------
+    # model_dump() returns None for unset optional fields, so use `or`
+    # coalescing instead of dict.get() defaults.
+    def _int_or(key: str, default: int) -> int:
+        v = raw.get(key)
+        return default if v is None else int(v)
+
+    def _str_or(key: str, default: str | None) -> str | None:
+        v = raw.get(key)
+        return default if v is None else str(v)
+
+    timestamp = _int_or("timestamp", 0)
+    card1 = _int_or("card1", -1)
+    addr1 = _int_or("addr1", -1)
+    addr2 = _int_or("addr2", -1)
+    id_19 = _str_or("id_19", None)
+    id_20 = _str_or("id_20", None)
+    device_type = _str_or("DeviceType", None)
+    product_cd = _str_or("ProductCD", None) or _str_or("merchant_category", "W")
+    has_identity = _int_or("has_identity_data", 0)
+
+    # -- build internal single-row DataFrame -----------------------------
+    df = pd.DataFrame(
+        [
+            {
+                "TransactionID": 0,
+                "isFraud": 0,  # placeholder — never used as a feature
+                "TransactionDT": timestamp,
+                "TransactionAmt": float(raw["amount"]),
+                "ProductCD": product_cd,
+                "card1": card1,
+                "addr1": addr1,
+                "addr2": addr2,
+                "id_19": id_19,
+                "id_20": id_20,
+                "DeviceType": device_type,
+                "has_identity_data": np.int8(has_identity),
+            }
+        ]
+    )
+
+    # -- direct features (current row only) ------------------------------
+    direct = _compute_direct_features(df)
+
+    # -- identity features -----------------------------------------------
+    device_fp = construct_device_fingerprint(df)
+    is_new_dev = compute_is_new_device(df, device_fp)
+    identity = pd.DataFrame(
+        {"device_fingerprint": device_fp, "is_new_device": is_new_dev}
+    )
+
+    # -- historical features (cold-start defaults for single row) --------
+    historical = compute_all_historical_features(df)
+
+    # -- assemble --------------------------------------------------------
+    features = pd.concat([direct, identity, historical], axis=1)
+
+    # -- guarantee FEATURE_LIST columns ----------------------------------
+    missing = set(FEATURE_LIST) - set(features.columns)
+    if missing:
+        raise ValueError(
+            f"Feature engineering missing columns: {sorted(missing)}"
+        )
+
+    return features[FEATURE_LIST]
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 

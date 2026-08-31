@@ -5,12 +5,18 @@ Implements the ML/Fraud Intelligence Service HTTP interface defined in
 
 Endpoints:
 
-  ``POST /predict``  — Score a single transaction for fraud.
+  ``POST /predict``  — Score a single raw transaction for fraud.
   ``GET  /health``   — Service health and model availability.
 
 The model is loaded **once** at application startup via a lifespan
 handler and reused for all requests — no retraining or refitting
 per request.
+
+The ``POST /predict`` endpoint accepts raw transaction data (as sent
+by the backend ``TransactionCreate`` payload), computes the 24
+engineered features internally via
+:func:`ml.features.engineer.engineer_features_for_inference`, then
+runs prediction and SHAP explanation.
 
 Run locally::
 
@@ -26,11 +32,10 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-import pandas as pd
 from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ml.features.engineer import FEATURE_LIST
+from ml.features.engineer import engineer_features_for_inference
 from ml.predict.bundle import model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
 
@@ -64,45 +69,101 @@ app = FastAPI(
 
 # ── Request / Response schemas ────────────────────────────────────────
 
+_FORBIDDEN_KEYS = frozenset({"isFraud", "TransactionID"})
 
-class FeatureInput(BaseModel):
-    """Engineered feature vector for a single transaction.
 
-    All 24 features produced by ``ml.features.engineer`` must be
-    provided.  Extra fields are rejected.
+class CustomerHistory(BaseModel):
+    """Optional customer history for richer feature engineering.
+
+    When provided, historical features can use real values instead
+    of cold-start defaults.  All fields are optional.
     """
 
-    amount: float = Field(..., description="Transaction amount")
-    amount_deviation: float = Field(..., description="Z-score deviation from customer avg")
-    amount_to_avg_ratio: float = Field(..., description="Ratio to customer average")
-    location_country: float = Field(..., description="Encoded country")
-    location_region: float = Field(..., description="Encoded region")
-    location_is_new: int = Field(..., ge=0, le=1, description="New location flag")
-    location_change: int = Field(..., ge=0, le=1, description="Location change flag")
-    device_fingerprint: str = Field(..., description="Device identifier or 'no_device_data'")
-    is_new_device: int = Field(..., ge=0, le=1, description="New device flag")
-    hour_of_day_raw: int = Field(..., ge=0, le=23, description="Hour of day (integer)")
-    hour_of_day_sin: float = Field(..., description="Hour sin encoding")
-    hour_of_day_cos: float = Field(..., description="Hour cos encoding")
-    day_of_week_raw: int = Field(..., ge=0, le=6, description="Day of week (integer)")
-    day_of_week_sin: float = Field(..., description="Day sin encoding")
-    day_of_week_cos: float = Field(..., description="Day cos encoding")
-    is_unusual_hour: int = Field(..., ge=0, le=1, description="Unusual hour flag")
-    tx_velocity_1h: int = Field(..., ge=0, description="Transactions in last 1h")
-    tx_velocity_24h: int = Field(..., ge=0, description="Transactions in last 24h")
-    tx_velocity_7d: int = Field(..., ge=0, description="Transactions in last 7d")
-    merchant_category: int = Field(..., description="Encoded merchant category")
-    merchant_is_new: int = Field(..., ge=0, le=1, description="New merchant flag")
-    avg_spend_30d: float = Field(..., ge=0, description="30-day avg spend")
-    previous_suspicious_count: int = Field(..., ge=0, description="Prior flagged count")
-    has_identity_data: int = Field(..., ge=0, le=1, description="Identity data flag")
+    transaction_count_30d: int | None = Field(
+        None, ge=0, description="Transactions in last 30 days"
+    )
+    avg_amount_30d: float | None = Field(
+        None, ge=0, description="Average amount in last 30 days"
+    )
+    std_amount_30d: float | None = Field(
+        None, ge=0, description="Std deviation of amounts in last 30 days"
+    )
+    last_transaction_country: str | None = Field(
+        None, description="Country of last transaction"
+    )
+    known_device_fingerprints: list[str] | None = Field(
+        None, description="Previously seen device fingerprints"
+    )
+    known_merchant_ids: list[str] | None = Field(
+        None, description="Previously seen merchant identifiers"
+    )
+    previous_flagged_count: int | None = Field(
+        None, ge=0, description="Previously flagged transactions"
+    )
 
-    @field_validator("amount")
+
+class RawTransactionInput(BaseModel):
+    """Raw transaction payload — matches backend ``TransactionCreate``.
+
+    Required fields align with the backend schema so the backend can
+    send ``request.model_dump()`` directly.  Additional optional
+    fields allow richer feature engineering when available.
+    """
+
+    # -- required (from backend TransactionCreate) -----------------------
+    amount: float = Field(..., gt=0, description="Transaction amount")
+    currency: str = Field(..., min_length=3, max_length=3)
+    merchant_name: str = Field(..., min_length=1, max_length=255)
+    merchant_category: str = Field(..., max_length=10)
+    transaction_type: str = Field(
+        ..., pattern=r"^(purchase|transfer|withdrawal)$"
+    )
+    location_country: str = Field(..., min_length=1, max_length=100)
+    location_city: str = Field(..., max_length=100)
+    device_fingerprint: str = Field(..., min_length=1, max_length=255)
+    device_type: str = Field(..., pattern=r"^(mobile|desktop|pos)$")
+    ip_address: str = Field(..., min_length=7, max_length=45)
+
+    # -- optional: raw dataset field mappings ----------------------------
+    timestamp: int | None = Field(
+        None, ge=0, description="TransactionDT (seconds from reference)"
+    )
+    card1: int | None = Field(
+        None, description="Card identifier for grouping"
+    )
+    addr1: int | None = Field(
+        None, description="Region code (integer)"
+    )
+    addr2: int | None = Field(
+        None, description="Country code (integer)"
+    )
+    ProductCD: str | None = Field(
+        None, max_length=1, description="Product code (W/X/Y/Z/S)"
+    )
+    id_19: str | None = Field(None, description="Identity field id_19")
+    id_20: str | None = Field(None, description="Identity field id_20")
+    DeviceType: str | None = Field(
+        None, description="Device type from identity table"
+    )
+    has_identity_data: int | None = Field(
+        None, ge=0, le=1, description="Whether identity data exists"
+    )
+
+    # -- optional: customer history --------------------------------------
+    customer_history: CustomerHistory | None = None
+
+    # -- leakage protection ----------------------------------------------
+    @model_validator(mode="before")
     @classmethod
-    def amount_must_be_positive(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError("amount must be positive")
-        return v
+    def reject_forbidden_fields(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            found = _FORBIDDEN_KEYS & set(values.keys())
+            if found:
+                raise ValueError(
+                    f"Forbidden fields in request: {sorted(found)}. "
+                    f"isFraud and TransactionID are not allowed."
+                )
+        return values
 
 
 class FactorOutput(BaseModel):
@@ -115,8 +176,12 @@ class FactorOutput(BaseModel):
 class PredictionResponse(BaseModel):
     """Response from the /predict endpoint."""
 
-    fraud_probability: float = Field(..., description="Fraud probability ∈ [0, 1]")
-    fraud_prediction: int = Field(..., description="Binary prediction (0=legit, 1=fraud)")
+    fraud_probability: float = Field(
+        ..., description="Fraud probability in [0, 1]"
+    )
+    fraud_prediction: int = Field(
+        ..., description="Binary prediction (0=legit, 1=fraud)"
+    )
     threshold: float = Field(..., description="Decision threshold used")
     model_version: str = Field(..., description="Model version string")
     explanation: list[FactorOutput] | None = Field(
@@ -137,12 +202,14 @@ class HealthResponse(BaseModel):
 
 
 @app.post("/predict", response_model=PredictionResponse)
-def predict(request: FeatureInput) -> PredictionResponse:
-    """Score a single transaction for fraud.
+def predict(request: RawTransactionInput) -> PredictionResponse:
+    """Score a single raw transaction for fraud.
 
-    Requires a loaded model.  Returns 503 if the model is unavailable.
-    The response always includes ``explanation`` with SHAP feature
-    attributions when the model supports it.
+    Accepts raw transaction data, computes 24 engineered features
+    internally, runs the XGBoost model, and returns the prediction
+    with SHAP explanations.
+
+    Returns 503 if the model is unavailable.
     """
     if _predictor is None:
         raise HTTPException(
@@ -150,12 +217,19 @@ def predict(request: FeatureInput) -> PredictionResponse:
             detail="Model not available. Run `python -m ml.predict.save_model` first.",
         )
 
-    # Convert Pydantic model to DataFrame with correct column order
-    data = request.model_dump()
-    df = pd.DataFrame([data])
-
+    # Convert raw transaction to 24 engineered features
+    raw_data = request.model_dump()
     try:
-        result: PredictionResult = _predictor.predict(df, explain=True)
+        features_df = engineer_features_for_inference(raw_data)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Feature engineering failed: {exc}",
+        )
+
+    # Run prediction + SHAP explanation
+    try:
+        result: PredictionResult = _predictor.predict(features_df, explain=True)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
