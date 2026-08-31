@@ -19,8 +19,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, status
 
 from backend.schemas import (
+    MLBehaviourSignal,
     MLExplanation,
+    MLFactor,
     MLPredictionResponse,
+    MLRuleTrigger,
     OutcomeResponse,
     OutcomeUpdate,
     TransactionCreate,
@@ -111,10 +114,35 @@ async def create_transaction(request: TransactionCreate) -> TransactionResponse:
             detail="ML fraud detection returned an error.",
         )
 
-    # Build response — merge transaction data with fraud results
+    # Build response — merge transaction data with fraud results.
+    # Prefer the structured explanation_detail (architecture §6) when
+    # available; fall back to the legacy explanation list for older
+    # ML service versions.
     explanation = None
-    if ml_result.explanation is not None:
-        explanation = MLExplanation(ml_top_factors=ml_result.explanation)
+    expl_detail = getattr(ml_result, "explanation_detail", None)
+    if expl_detail is not None and isinstance(expl_detail, dict):
+        factors = [
+            MLFactor(feature=f["feature"], importance=f["importance"])
+            for f in expl_detail.get("ml_top_factors", [])
+        ]
+        beh_signals = [
+            MLBehaviourSignal(signal=s["signal"], severity=s["severity"])
+            for s in expl_detail.get("behaviour_signals", [])
+        ]
+        rule_triggers = [
+            MLRuleTrigger(rule=r["rule"], contribution=r["contribution"])
+            for r in expl_detail.get("rules_triggered", [])
+        ]
+        explanation = MLExplanation(
+            ml_top_factors=factors,
+            behaviour_signals=beh_signals,
+            rules_triggered=rule_triggers,
+        )
+    elif ml_result.explanation is not None:
+        # Legacy path — ml_result.explanation is list[MLFactor]
+        explanation = MLExplanation(
+            ml_top_factors=list(ml_result.explanation),
+        )
 
     return TransactionResponse(
         amount=request.amount,

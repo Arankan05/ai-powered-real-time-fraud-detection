@@ -45,6 +45,7 @@ from ml.features.history import (
 import ml.features.history as _history_module
 from ml.predict.bundle import model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
+from ml.rules.engine import evaluate_rules
 
 # ── Lifespan: load model once at startup ──────────────────────────────
 
@@ -208,6 +209,36 @@ class FactorOutput(BaseModel):
     importance: float = Field(..., description="SHAP contribution value")
 
 
+class RuleTriggerOutput(BaseModel):
+    """Single triggered risk rule."""
+
+    rule: str = Field(..., description="Rule identifier")
+    contribution: int = Field(..., description="Score contribution")
+    reason: str = Field(..., description="Human-readable explanation")
+
+
+class BehaviourSignalOutput(BaseModel):
+    """Single behavioural anomaly signal."""
+
+    signal: str = Field(..., description="Signal identifier")
+    severity: float = Field(..., description="Severity in [0, 1]")
+    reason: str = Field(..., description="Human-readable explanation")
+
+
+class ExplanationOutput(BaseModel):
+    """Composite explanation from ML, behaviour, and rule components."""
+
+    ml_top_factors: list[FactorOutput] = Field(
+        default_factory=list, description="Top SHAP feature attributions"
+    )
+    behaviour_signals: list[BehaviourSignalOutput] = Field(
+        default_factory=list, description="Behavioural anomaly signals"
+    )
+    rules_triggered: list[RuleTriggerOutput] = Field(
+        default_factory=list, description="Triggered risk rules"
+    )
+
+
 class PredictionResponse(BaseModel):
     """Response from the /predict endpoint."""
 
@@ -219,6 +250,7 @@ class PredictionResponse(BaseModel):
     )
     threshold: float = Field(..., description="Decision threshold used")
     model_version: str = Field(..., description="Model version string")
+    # Legacy explanation field (backward-compatible)
     explanation: list[FactorOutput] | None = Field(
         None,
         description="Top SHAP feature attributions (sorted by |importance| desc)",
@@ -226,6 +258,32 @@ class PredictionResponse(BaseModel):
     timestamp: int | None = Field(
         None,
         description="Transaction timestamp used (for outcome feedback reference)",
+    )
+    # Risk scores (architecture §5)
+    ml_score: int | None = Field(
+        None, description="ML probability scaled to [0, 100]"
+    )
+    behaviour_score: int | None = Field(
+        None, description="Behavioural anomaly score [0, 100]"
+    )
+    rule_score: int | None = Field(
+        None, description="Rule-based risk score [0, 100]"
+    )
+    risk_score: int | None = Field(
+        None, description="Aggregated risk score [0, 100]"
+    )
+    risk_level: str | None = Field(
+        None, description="Risk level: LOW, MEDIUM, or HIGH"
+    )
+    decision: str | None = Field(
+        None, description="Decision: APPROVE, VERIFY, or HOLD"
+    )
+    # Structured explanation (architecture §6)
+    explanation_detail: ExplanationOutput | None = Field(
+        None, description="Full structured explanation with behaviour and rule signals"
+    )
+    risk_factors: list[str] | None = Field(
+        None, description="Combined list of all risk factor identifiers"
     )
 
 
@@ -263,6 +321,35 @@ class HealthResponse(BaseModel):
     features: int | None = Field(None, description="Number of model features")
 
 
+# ── Risk aggregation weights (architecture §5) ──────────────────────
+
+_W_ML = float(os.environ.get("ML_WEIGHT_ML", "0.50"))
+_W_BEHAVIOUR = float(os.environ.get("ML_WEIGHT_BEHAVIOUR", "0.30"))
+_W_RULE = float(os.environ.get("ML_WEIGHT_RULE", "0.20"))
+
+_RISK_THRESHOLDS = [
+    (70, "HIGH", "HOLD"),
+    (30, "MEDIUM", "VERIFY"),
+    (0, "LOW", "APPROVE"),
+]
+
+
+def _compute_risk(
+    ml_score: int, behaviour_score: int, rule_score: int
+) -> tuple[int, str, str]:
+    """Aggregate scores and determine risk level / decision."""
+    raw = (
+        _W_ML * ml_score
+        + _W_BEHAVIOUR * behaviour_score
+        + _W_RULE * rule_score
+    )
+    risk_score = int(max(0, min(round(raw), 100)))
+    for threshold, level, decision in _RISK_THRESHOLDS:
+        if risk_score > threshold:
+            return risk_score, level, decision
+    return risk_score, "LOW", "APPROVE"
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 
@@ -271,8 +358,9 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
     """Score a single raw transaction for fraud.
 
     Accepts raw transaction data, computes 24 engineered features
-    internally, runs the XGBoost model, and returns the prediction
-    with SHAP explanations.
+    internally, evaluates rule-based risk signals, runs the XGBoost
+    model, and returns the prediction with SHAP explanations and
+    risk scores.
 
     Returns 503 if the model is unavailable.
     """
@@ -291,6 +379,19 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         raw_data["timestamp"] = int(time.time())
 
     _store = _history_module.history_store
+
+    # Retrieve history for both feature engineering and rule evaluation.
+    # The history lookup uses the same temporal safety as the feature pipeline.
+    history_records: list[dict] = []
+    if _store is not None:
+        from ml.features.engineer import _resolve_customer_id
+        cid = _resolve_customer_id(raw_data)
+        ts = int(raw_data.get("timestamp", 0))
+        try:
+            history_records = _store.get(cid, before_timestamp=ts)
+        except Exception:
+            history_records = []
+
     try:
         features_df = engineer_features_for_inference(
             raw_data, history_store=_store
@@ -310,13 +411,63 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             detail=str(exc),
         )
 
-    # Build explanation list for response
+    # Evaluate rule-based risk signals and behavioural anomalies
+    try:
+        rule_result = evaluate_rules(features_df, raw_data, history_records)
+    except Exception:
+        # Rule evaluation must never block prediction — fall back to empty.
+        from ml.rules.engine import RuleResult
+        rule_result = RuleResult(
+            rule_score=0, behaviour_score=0,
+            rules_triggered=[], behaviour_signals=[],
+        )
+
+    # Build SHAP explanation list (legacy field)
     factors = None
     if result.explanation is not None:
         factors = [
             FactorOutput(feature=f["feature"], importance=f["importance"])
             for f in result.explanation
         ]
+
+    # Compute risk scores (architecture §5)
+    ml_score = int(round(result.fraud_probability * 100))
+    behaviour_score = rule_result.behaviour_score
+    rule_score = rule_result.rule_score
+    risk_score, risk_level, decision = _compute_risk(
+        ml_score, behaviour_score, rule_score
+    )
+
+    # Build structured explanation (architecture §6)
+    explanation_detail = ExplanationOutput(
+        ml_top_factors=factors or [],
+        behaviour_signals=[
+            BehaviourSignalOutput(
+                signal=s.signal, severity=s.severity, reason=s.reason
+            )
+            for s in rule_result.behaviour_signals
+        ],
+        rules_triggered=[
+            RuleTriggerOutput(
+                rule=r.rule, contribution=r.contribution, reason=r.reason
+            )
+            for r in rule_result.rules_triggered
+        ],
+    )
+
+    # Build combined risk_factors list
+    risk_factors: list[str] = []
+    if factors:
+        risk_factors.extend(f.feature for f in factors[:5])
+    risk_factors.extend(s.signal for s in rule_result.behaviour_signals)
+    risk_factors.extend(r.rule for r in rule_result.rules_triggered)
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_factors: list[str] = []
+    for f in risk_factors:
+        if f not in seen:
+            seen.add(f)
+            unique_factors.append(f)
 
     # Record transaction in history store for future lookups.
     # Best-effort: a recording failure must never block prediction.
@@ -332,6 +483,14 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         model_version=result.model_version,
         explanation=factors,
         timestamp=raw_data.get("timestamp"),
+        ml_score=ml_score,
+        behaviour_score=behaviour_score,
+        rule_score=rule_score,
+        risk_score=risk_score,
+        risk_level=risk_level,
+        decision=decision,
+        explanation_detail=explanation_detail,
+        risk_factors=unique_factors if unique_factors else None,
     )
 
 
