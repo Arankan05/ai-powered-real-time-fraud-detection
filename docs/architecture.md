@@ -163,11 +163,9 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 
 ## Status
 
-**Step 42 (ML service production hardening) is complete.** The ML service
-now has separate liveness/readiness probes, hardened input validation,
-thread-safe SHAP explanation, controlled error handling (no information
-leakage), model output validation, and a global exception handler.
-Step 41 (customer identity isolation), Step 40 (PostgreSQL migration),
-Step 39 (JWT auth), Step 38 (alert system), Step 34 (risk aggregation),
-Step 33 (rule signals), Step 32 (outcome feedback), and Step 31
-(historical features) are all complete.
+**Step 43 (ML monitoring and observability) is complete.** The ML
+service now tracks prediction metrics, latency, error categories,
+and drift signals via a thread-safe in-process aggregator exposed
+through `GET /metrics`. Step 42 (production hardening), Step 41
+(customer identity isolation), Step 40 (PostgreSQL migration),
+and all earlier steps are complete.

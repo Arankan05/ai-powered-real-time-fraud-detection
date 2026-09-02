@@ -767,6 +767,66 @@ Role escalation through the public API is impossible: registration
 * History store uses `threading.Lock` for thread-safe concurrent access.
 * Global exception handler catches unhandled errors without leaking internals.
 
+### ML monitoring and observability (Step 43)
+
+**Monitoring endpoint** (ML service on port 8001):
+
+| Endpoint | Purpose | Auth |
+|----------|---------|------|
+| `GET /metrics` | Aggregate prediction metrics snapshot | Internal (behind backend trust boundary) |
+
+**Metrics response** (`GET /metrics`):
+
+```json
+{
+  "total_requests": 42,
+  "successful_predictions": 40,
+  "failed_predictions": 2,
+  "error_rate": 0.0476,
+  "fraud_count": 5,
+  "non_fraud_count": 35,
+  "slow_predictions": 0,
+  "decisions": {"APPROVE": 30, "VERIFY": 7, "HOLD": 3},
+  "risk_levels": {"LOW": 28, "MEDIUM": 8, "HIGH": 4},
+  "errors": {"validation": 1, "feature_engineering": 1, ...},
+  "model_version": "fraud-xgb-v1.0.0",
+  "latency": {
+    "count": 40, "mean_seconds": 0.085,
+    "p50_seconds": 0.072, "p95_seconds": 0.198, "p99_seconds": 0.310
+  },
+  "drift": {"baseline_configured": false, "message": "No baseline configured."},
+  "config": {"latency_warn_seconds": 5.0, ...}
+}
+```
+
+**What is tracked:**
+
+* Request counts (total, success, failure)
+* Prediction latency (mean, p50, p95, p99, min, max)
+* Error distribution by bounded category
+* Fraud/non-fraud counts
+* Decision and risk-level distribution
+* Model version
+* Drift signals (when baseline is configured)
+
+**What is NOT tracked:**
+
+* Raw transaction payloads, customer IDs, merchant names
+* Passwords, JWT tokens, authorization headers, filesystem paths
+
+**Drift monitoring:**
+
+* Optional baseline via `ML_BASELINE_*` environment variables
+* Mean/std comparison with configurable threshold (`ML_DRIFT_STD_MULTIPLIER`)
+* Drift is purely observational — never changes predictions or decisions
+* Without baseline, drift monitoring reports "not configured"
+
+**Process-local limitation:**
+
+Metrics are process-local (in-memory). Multi-process deployments would
+report per-process metrics. Global aggregation requires an external
+metrics collector (e.g., Prometheus).
+
 ### Configuration
 
 See `.env.example`. Key variables: `BACKEND_SECRET_KEY` (JWT signing

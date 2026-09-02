@@ -354,9 +354,7 @@ The API exposes `explanation` (camelCase-friendly); the database column is `expl
 
 ## Status
 
-**Step 42 (ML service production hardening) is complete.** No database
-schema changes were required for Step 42. The `users` and `alerts`
+**Step 43 (ML monitoring and observability) is complete.** No database
+schema changes were required for Step 43. The `users` and `alerts`
 tables remain in PostgreSQL with idempotent schema init (Steps 40–41).
-Remaining tables (`customers`, `transactions`, `merchants`, `audit_logs`,
-`customer_devices`, `model_metadata`, `risk_rules_config`) are designed
-but not yet implemented.
+Remaining tables are designed but not yet implemented.

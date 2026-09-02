@@ -46,6 +46,7 @@ from ml.predict.bundle import ModelLoadError, model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
 from ml.risk.aggregator import aggregate_risk
 from ml.rules.engine import evaluate_rules
+from ml.monitoring.metrics import metrics as _metrics
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +356,10 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
 
     Returns 503 if the model is unavailable.
     """
+    _t0 = time.monotonic()
+
     if _predictor is None:
+        _metrics.record_error(category="model_unavailable")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="ML model not available. Contact service administrator.",
@@ -388,6 +392,7 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             raw_data, history_store=_store
         )
     except Exception as exc:
+        _metrics.record_error(category="feature_engineering")
         logger.warning("Feature engineering failed: %s", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -398,11 +403,13 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
     try:
         result: PredictionResult = _predictor.predict(features_df, explain=True)
     except ValueError as exc:
+        _metrics.record_error(category="validation")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         )
     except Exception as exc:
+        _metrics.record_error(category="prediction_failure")
         logger.error("Prediction failed: %s", type(exc).__name__, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -411,6 +418,7 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
 
     # Validate prediction output is sane
     if not (0.0 <= result.fraud_probability <= 1.0):
+        _metrics.record_error(category="prediction_failure")
         logger.error("Model returned out-of-range probability: %s", result.fraud_probability)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -482,10 +490,25 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
     except Exception:
         logger.warning("Failed to record transaction in history", exc_info=True)
 
+    _latency_ms = (time.monotonic() - _t0) * 1000.0
+
     logger.info(
-        "Prediction complete: model=%s risk=%s decision=%s prob=%.4f",
+        "Prediction complete: model=%s risk=%s decision=%s prob=%.4f "
+        "latency=%.1fms",
         result.model_version, assessment.risk_level, assessment.decision,
-        result.fraud_probability,
+        result.fraud_probability, _latency_ms,
+    )
+
+    # Record monitoring metrics (Step 43)
+    _metrics.record_success(
+        latency_ms=_latency_ms,
+        fraud_prediction=result.fraud_prediction,
+        fraud_probability=result.fraud_probability,
+        decision=assessment.decision,
+        risk_level=assessment.risk_level,
+        risk_score=assessment.risk_score,
+        amount=request.amount,
+        model_version=result.model_version,
     )
 
     return PredictionResponse(
@@ -611,6 +634,58 @@ def _store_type_label(store) -> str:
     if isinstance(store, SQLiteHistoryRepository):
         return "sqlite"
     return "in_memory"
+
+
+# ── Monitoring endpoint (Step 43) ─────────────────────────────────────
+
+
+class MetricsResponse(BaseModel):
+    """Aggregate prediction metrics snapshot."""
+    total_requests: int = Field(..., description="Total prediction requests received")
+    successful_predictions: int = Field(..., description="Successful predictions")
+    failed_predictions: int = Field(..., description="Failed predictions")
+    error_rate: float = Field(..., description="Error rate (failed/total)")
+    fraud_count: int = Field(..., description="Predictions classified as fraud")
+    non_fraud_count: int = Field(..., description="Predictions classified as legitimate")
+    slow_predictions: int = Field(..., description="Predictions exceeding latency threshold")
+    decisions: dict[str, int] = Field(
+        ..., description="Decision distribution: APPROVE, VERIFY, HOLD"
+    )
+    risk_levels: dict[str, int] = Field(
+        ..., description="Risk level distribution: LOW, MEDIUM, HIGH"
+    )
+    errors: dict[str, int] = Field(
+        ..., description="Error category counts"
+    )
+    model_version: str | None = Field(
+        None, description="Currently loaded model version"
+    )
+    latency: dict[str, Any] = Field(
+        ..., description="Latency statistics (seconds)"
+    )
+    drift: dict[str, Any] = Field(
+        ..., description="Drift monitoring status"
+    )
+    config: dict[str, float] = Field(
+        ..., description="Monitoring configuration thresholds"
+    )
+
+
+@app.get("/metrics", response_model=MetricsResponse)
+def get_metrics() -> MetricsResponse:
+    """Aggregate prediction metrics snapshot.
+
+    Returns operational metrics including request counts, latency
+    statistics, error distribution, fraud/decision distribution,
+    model version, and drift status.
+
+    **Does NOT expose raw transactions, customer IDs, or secrets.**
+
+    This endpoint is intended for internal monitoring only.
+    The ML service runs on an internal network behind the backend
+    trust boundary.
+    """
+    return MetricsResponse(**_metrics.snapshot())
 
 
 # ── Global error handlers (Step 42: prevent information leakage) ─────
