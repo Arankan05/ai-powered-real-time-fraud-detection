@@ -710,6 +710,63 @@ Role escalation through the public API is impossible: registration
   **401** with an identical body for unknown email and wrong password
   (no account enumeration); inactive accounts receive **403**.
 
+### Customer identity enforcement (Step 41)
+
+* `customer_id` in transaction and alert responses is derived
+  server-side from the authenticated user's JWT (`sub` → user record
+  → `customer_id`).  The client cannot supply or override it.
+* `TransactionCreate` has no `customer_id` field — it is not part of
+  the request contract.
+* The backend injects the authenticated `customer_id` into the ML
+  service payload so customer-specific historical features use the
+  correct identity.
+* Alerts created from HOLD decisions carry the authenticated
+  customer's `customer_id`.
+* `PATCH /transactions/outcome` remains analyst/admin only; the
+  endpoint accepts `customer_id` in the request body (analysts label
+  any customer's transactions).
+
+### ML service production hardening (Step 42)
+
+**Health / readiness endpoints** (ML service on port 8001):
+
+| Endpoint | Purpose | Response |
+|----------|---------|----------|
+| `GET /live` | Liveness probe — process alive | `{"status": "alive"}` — always 200 |
+| `GET /ready` | Readiness probe — model loaded | 200 `{"status": "ready", ...}` or 503 `{"status": "not_ready"}` |
+| `GET /health` | Legacy health check | `{"status": "ready"|"model_unavailable", ...}` |
+
+**ML failure behaviour:**
+
+| Condition | HTTP status | Detail message |
+|-----------|-------------|----------------|
+| Model not loaded | 503 | Safe message (no paths/secrets) |
+| Invalid transaction data | 422 | Controlled validation message |
+| Internal prediction failure | 500 | "Prediction processing failed." |
+| Feature engineering error | 422 | Controlled message |
+
+**Input validation hardening (Step 42):**
+
+* `amount`: `(0, 10,000,000]` — rejects zero, negative, and excessive values.
+* `currency`: `^[A-Z]{3}$` — ISO 4217 uppercase 3-letter code.
+* `ProductCD`: `^[WXYZS]$` — valid product codes only.
+* `id_19`, `id_20`: max 100 chars. `DeviceType`: max 50 chars.
+* All error responses are JSON with `detail` field — no stack traces or internal paths.
+
+**Timeout configuration:**
+
+* Backend → ML service timeout: `ML_REQUEST_TIMEOUT_SECONDS` (default 5s).
+* Connection errors, timeouts, and HTTP errors are mapped to
+  `MLServiceUnavailableError`, `MLServiceTimeoutError`, or
+  `MLServiceResponseError` and surfaced as **503** to API clients.
+
+**Concurrency safety:**
+
+* Model loaded once at startup; read-only during prediction.
+* SHAP explainer initialisation is thread-safe (double-checked lock).
+* History store uses `threading.Lock` for thread-safe concurrent access.
+* Global exception handler catches unhandled errors without leaking internals.
+
 ### Configuration
 
 See `.env.example`. Key variables: `BACKEND_SECRET_KEY` (JWT signing

@@ -6,24 +6,21 @@ Implements the ML/Fraud Intelligence Service HTTP interface defined in
 Endpoints:
 
   ``POST /predict``  — Score a single raw transaction for fraud.
-  ``GET  /health``   — Service health and model availability.
+  ``GET  /health``   — Service health and model availability (legacy).
+  ``GET  /live``     — Liveness probe (process alive).
+  ``GET  /ready``    — Readiness probe (model loaded, service operational).
 
 The model is loaded **once** at application startup via a lifespan
 handler and reused for all requests — no retraining or refitting
 per request.
-
-The ``POST /predict`` endpoint accepts raw transaction data (as sent
-by the backend ``TransactionCreate`` payload), computes the 24
-engineered features internally via
-:func:`ml.features.engineer.engineer_features_for_inference`, then
-runs prediction and SHAP explanation.
 
 Run locally::
 
     uvicorn ml.api.app:app --host 0.0.0.0 --port 8001
 
 Environment:
-  ``ML_MODEL_PATH``  — Override the default artifact path.
+  ``ML_MODEL_PATH``        — Override the default artifact path.
+  ``ML_HISTORY_DB_PATH``   — SQLite history store path.
 """
 
 from __future__ import annotations
@@ -34,7 +31,8 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ml.features.engineer import engineer_features_for_inference
@@ -44,7 +42,7 @@ from ml.features.history import (
     record_transaction,
 )
 import ml.features.history as _history_module
-from ml.predict.bundle import model_exists
+from ml.predict.bundle import ModelLoadError, model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
 from ml.risk.aggregator import aggregate_risk
 from ml.rules.engine import evaluate_rules
@@ -65,9 +63,16 @@ async def lifespan(app: FastAPI):
     model_path = os.environ.get("ML_MODEL_PATH")
     try:
         _predictor = FraudPredictor(bundle_path=model_path)
-        logger.info("Model loaded: %s", _predictor.model_version)
-    except (FileNotFoundError, KeyError) as exc:
+        logger.info("Model loaded: version=%s", _predictor.model_version)
+    except FileNotFoundError as exc:
         logger.warning("Model not available: %s", exc)
+        _predictor = None
+    except (ModelLoadError, KeyError) as exc:
+        logger.warning("Model load failed: %s", exc)
+        _predictor = None
+    except Exception as exc:
+        # Catch-all: any unexpected loading failure should not crash startup.
+        logger.warning("Unexpected model load failure (%s); service starts without model", type(exc).__name__)
         _predictor = None
 
     # ── History store ─────────────────────────────────────────────
@@ -141,11 +146,20 @@ class RawTransactionInput(BaseModel):
     Required fields align with the backend schema so the backend can
     send ``request.model_dump()`` directly.  Additional optional
     fields allow richer feature engineering when available.
+
+    Step 42: hardened validation — upper bounds, format checks,
+    and sanitised error messages.
     """
 
     # -- required (from backend TransactionCreate) -----------------------
-    amount: float = Field(..., gt=0, description="Transaction amount")
-    currency: str = Field(..., min_length=3, max_length=3)
+    amount: float = Field(
+        ..., gt=0, le=10_000_000,
+        description="Transaction amount (0, 10M]",
+    )
+    currency: str = Field(
+        ..., pattern=r"^[A-Z]{3}$",
+        description="ISO 4217 currency code (3 uppercase letters)",
+    )
     merchant_name: str = Field(..., min_length=1, max_length=255)
     merchant_category: str = Field(..., max_length=10)
     transaction_type: str = Field(
@@ -160,7 +174,7 @@ class RawTransactionInput(BaseModel):
     # -- optional: customer identification ---------------------------------
     customer_id: str | None = Field(
         None, min_length=1, max_length=255,
-        description="Customer identifier (falls back to device_fingerprint)",
+        description="Server-authoritative customer identifier (Step 41)",
     )
 
     # -- optional: raw dataset field mappings ----------------------------
@@ -177,12 +191,12 @@ class RawTransactionInput(BaseModel):
         None, description="Country code (integer)"
     )
     ProductCD: str | None = Field(
-        None, max_length=1, description="Product code (W/X/Y/Z/S)"
+        None, pattern=r"^[WXYZS]$", description="Product code (W/X/Y/Z/S)"
     )
-    id_19: str | None = Field(None, description="Identity field id_19")
-    id_20: str | None = Field(None, description="Identity field id_20")
+    id_19: str | None = Field(None, max_length=100, description="Identity field id_19")
+    id_20: str | None = Field(None, max_length=100, description="Identity field id_20")
     DeviceType: str | None = Field(
-        None, description="Device type from identity table"
+        None, max_length=50, description="Device type from identity table"
     )
     has_identity_data: int | None = Field(
         None, ge=0, le=1, description="Whether identity data exists"
@@ -344,7 +358,7 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
     if _predictor is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Model not available. Run `python -m ml.predict.save_model` first.",
+            detail="ML model not available. Contact service administrator.",
         )
 
     # Convert raw transaction to 24 engineered features (with history)
@@ -374,9 +388,10 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
             raw_data, history_store=_store
         )
     except Exception as exc:
+        logger.warning("Feature engineering failed: %s", type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Feature engineering failed: {exc}",
+            detail="Transaction data could not be processed for feature extraction.",
         )
 
     # Run prediction + SHAP explanation
@@ -386,6 +401,20 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
+        )
+    except Exception as exc:
+        logger.error("Prediction failed: %s", type(exc).__name__, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Prediction processing failed.",
+        )
+
+    # Validate prediction output is sane
+    if not (0.0 <= result.fraud_probability <= 1.0):
+        logger.error("Model returned out-of-range probability: %s", result.fraud_probability)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Model produced an invalid prediction.",
         )
 
     # Evaluate rule-based risk signals and behavioural anomalies
@@ -454,8 +483,9 @@ def predict(request: RawTransactionInput) -> PredictionResponse:
         logger.warning("Failed to record transaction in history", exc_info=True)
 
     logger.info(
-        "Prediction complete: model=%s risk=%s decision=%s",
+        "Prediction complete: model=%s risk=%s decision=%s prob=%.4f",
         result.model_version, assessment.risk_level, assessment.decision,
+        result.fraud_probability,
     )
 
     return PredictionResponse(
@@ -518,13 +548,13 @@ def update_outcome(request: OutcomeUpdateRequest) -> OutcomeUpdateResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Service health check — reports model and history store status."""
+    """Service health check — reports model and history store status.
+
+    Legacy endpoint.  Prefer /live (liveness) and /ready (readiness)
+    for production orchestration.
+    """
     store = _history_module.history_store
-    store_type = (
-        "sqlite"
-        if isinstance(store, SQLiteHistoryRepository)
-        else "in_memory"
-    )
+    store_type = _store_type_label(store)
     if _predictor is None:
         return HealthResponse(status="model_unavailable", history_store=store_type)
     return HealthResponse(
@@ -533,3 +563,65 @@ def health() -> HealthResponse:
         features=len(_predictor.feature_names),
         history_store=store_type,
     )
+
+
+class LivenessResponse(BaseModel):
+    """Liveness probe — process is alive."""
+    status: str = Field(..., description="Always 'alive' if the process responds")
+
+
+class ReadinessResponse(BaseModel):
+    """Readiness probe — service can perform predictions."""
+    status: str = Field(..., description="'ready' or 'not_ready'")
+    model_version: str | None = Field(None, description="Loaded model version")
+    features: int | None = Field(None, description="Number of model features")
+    history_store: str | None = Field(
+        None, description="History store type ('sqlite' or 'in_memory')"
+    )
+
+
+@app.get("/live", response_model=LivenessResponse)
+def liveness() -> LivenessResponse:
+    """Liveness probe — always returns 200 if the process is running."""
+    return LivenessResponse(status="alive")
+
+
+@app.get("/ready", response_model=ReadinessResponse)
+def readiness() -> ReadinessResponse:
+    """Readiness probe — reports whether the model is loaded and service can predict."""
+    store = _history_module.history_store
+    store_type = _store_type_label(store)
+    if _predictor is None:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=ReadinessResponse(
+                status="not_ready", history_store=store_type
+            ).model_dump(),
+        )
+    return ReadinessResponse(
+        status="ready",
+        model_version=_predictor.model_version,
+        features=len(_predictor.feature_names),
+        history_store=store_type,
+    )
+
+
+def _store_type_label(store) -> str:
+    """Return a safe label for the history store type."""
+    if isinstance(store, SQLiteHistoryRepository):
+        return "sqlite"
+    return "in_memory"
+
+
+# ── Global error handlers (Step 42: prevent information leakage) ─────
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all: never expose internal exceptions to API clients."""
+    logger.error("Unhandled exception: %s", type(exc).__name__, exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error."},
+    )
+

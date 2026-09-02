@@ -79,6 +79,7 @@ def _alert_dict_to_response(alert: dict[str, Any]) -> AlertResponse:
     return AlertResponse(
         id=alert["id"],
         transaction_id=alert["transaction_id"],
+        customer_id=alert.get("customer_id"),
         risk_score=alert["risk_score"],
         risk_level=alert["risk_level"],
         decision=alert["decision"],

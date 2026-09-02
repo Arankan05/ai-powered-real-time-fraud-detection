@@ -156,5 +156,5 @@ A task is considered complete when:
 
 ## Status
 
-This workflow is agreed upon. Development is in progress (Step 40
-PostgreSQL migration complete; Steps 31–39 complete).
+This workflow is agreed upon. Development is in progress (Step 42
+ML service production hardening complete; Steps 31–41 complete).

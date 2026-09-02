@@ -354,10 +354,9 @@ The API exposes `explanation` (camelCase-friendly); the database column is `expl
 
 ## Status
 
-**Step 40 (PostgreSQL migration) is complete.** The `users` and `alerts`
-tables are implemented in PostgreSQL with idempotent schema init.
-Alembic migrations are not yet in use — schema is managed via
-`backend/db/postgres.py :: _SCHEMA_STATEMENTS`. Remaining tables
-(`customers`, `transactions`, `merchants`, `audit_logs`,
+**Step 42 (ML service production hardening) is complete.** No database
+schema changes were required for Step 42. The `users` and `alerts`
+tables remain in PostgreSQL with idempotent schema init (Steps 40–41).
+Remaining tables (`customers`, `transactions`, `merchants`, `audit_logs`,
 `customer_devices`, `model_metadata`, `risk_rules_config`) are designed
 but not yet implemented.

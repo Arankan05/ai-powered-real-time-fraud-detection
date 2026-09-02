@@ -23,6 +23,8 @@ Usage::
 
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,8 @@ import pandas as pd
 
 from ml.models.baseline import apply_preprocessing
 from ml.predict.bundle import ModelBundle, load_bundle
+
+logger = logging.getLogger(__name__)
 
 # ── Lazy SHAP import ──────────────────────────────────────────────────
 # SHAP is imported lazily so the prediction pipeline works even when
@@ -88,8 +92,11 @@ class FraudPredictor:
     def __init__(self, bundle_path: str | Path | None = None) -> None:
         self._bundle: ModelBundle = load_bundle(bundle_path)
         self._feature_set: set[str] = set(self._bundle.feature_names)
-        # Lazily initialised SHAP explainer (constructed on first use)
+        # Lazily initialised SHAP explainer (constructed on first use).
+        # Protected by a lock so concurrent predict(explain=True) calls
+        # do not race on initialisation.
         self._explainer = None
+        self._explainer_lock = threading.Lock()
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -194,12 +201,35 @@ class FraudPredictor:
     def _compute_explanation(
         self, X_transformed: np.ndarray
     ) -> list[dict[str, Any]]:
-        """Compute SHAP values for a single preprocessed input."""
+        """Compute SHAP values for a single preprocessed input.
+
+        Thread-safe: uses a lock around lazy explainer initialisation.
+        If SHAP fails, returns an empty list rather than crashing the
+        prediction.
+        """
         if self._explainer is None:
-            self._explainer = _lazy_explainer(self._bundle)
-        return self._explainer.explain(
-            X_transformed, self._bundle.feature_names
-        )
+            with self._explainer_lock:
+                if self._explainer is None:
+                    try:
+                        self._explainer = _lazy_explainer(self._bundle)
+                    except Exception:
+                        logger.warning(
+                            "SHAP explainer initialisation failed; "
+                            "explanations will be empty for this request",
+                            exc_info=True,
+                        )
+                        return []
+        try:
+            return self._explainer.explain(
+                X_transformed, self._bundle.feature_names
+            )
+        except Exception:
+            logger.warning(
+                "SHAP explanation computation failed; "
+                "returning empty explanation",
+                exc_info=True,
+            )
+            return []
 
     # ── Validation ────────────────────────────────────────────────────
 

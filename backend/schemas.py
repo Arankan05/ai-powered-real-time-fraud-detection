@@ -118,6 +118,7 @@ class AlertResponse(BaseModel):
 
     id: str
     transaction_id: str
+    customer_id: str | None = None
     risk_score: int
     risk_level: str
     decision: str
@@ -176,6 +177,9 @@ class TransactionResponse(BaseModel):
     device_fingerprint: str
     device_type: str
     ip_address: str
+
+    # Server-derived customer identity (Step 41)
+    customer_id: str | None = None
 
     # Fraud scoring results from ML service
     ml_score: int | None = None

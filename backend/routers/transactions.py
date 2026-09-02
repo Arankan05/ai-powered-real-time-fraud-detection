@@ -43,9 +43,13 @@ router = APIRouter(prefix="/api/v1", tags=["transactions"])
 # POST /transactions requires authentication (contract: "Auth required
 # (customer)").  During this integration phase any active authenticated
 # user (customer / fraud_analyst / admin) may submit transactions so
-# analysts can exercise the full fraud-detection flow; no customer
-# identity is injected into the ML payload yet, so nothing about the
-# fraud scoring changes.
+# analysts can exercise the full fraud-detection flow.
+#
+# Step 41: customer_id is now derived server-side from the authenticated
+# user (JWT → user record → customer_id).  The client cannot forge or
+# override this value.  The server-controlled customer_id is injected
+# into the ML payload (for customer-specific historical features) and
+# into alert creation (for customer-data association).
 _require_authenticated = get_current_user
 
 # Label feedback mutates ML training data — analyst/admin only.
@@ -105,11 +109,15 @@ async def create_transaction(
     """
     client = get_ml_client()
 
+    # Step 41: derive customer_id from the authenticated user.
+    # The server controls this value — the client cannot forge it.
+    customer_id = current_user.get("customer_id")
+
     # Build the payload for the ML service.
     # The current ML service expects 24 engineered features.
     # In the full integration the ML service will accept raw
     # transaction data and compute features internally.
-    ml_payload = _build_ml_payload(request)
+    ml_payload = _build_ml_payload(request, customer_id=customer_id)
 
     # Call ML service
     try:
@@ -162,6 +170,7 @@ async def create_transaction(
         transaction_id=transaction_id,
         request=request,
         explanation=explanation,
+        customer_id=customer_id,
     )
 
     return TransactionResponse(
@@ -175,6 +184,8 @@ async def create_transaction(
         device_fingerprint=request.device_fingerprint,
         device_type=request.device_type,
         ip_address=request.ip_address,
+        # Server-derived customer identity (Step 41)
+        customer_id=customer_id,
         # ML results
         fraud_probability=ml_result.fraud_probability,
         fraud_prediction=ml_result.fraud_prediction,
@@ -195,17 +206,24 @@ async def create_transaction(
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _build_ml_payload(request: TransactionCreate) -> dict[str, Any]:
+def _build_ml_payload(
+    request: TransactionCreate,
+    *,
+    customer_id: str | None = None,
+) -> dict[str, Any]:
     """Convert a raw transaction to the ML service request payload.
 
-    Currently passes the raw transaction fields through.  When the ML
-    service is updated to accept raw transaction data (and compute
-    features internally), this function requires no changes.
+    Step 41: injects the server-derived ``customer_id`` (from the
+    authenticated user) so the ML service can look up the correct
+    customer history.  The client cannot supply or override this value.
 
     When the backend includes customer history look-up, that data
-    will be added here as ``customer_id`` and ``customer_history``.
+    will be added here as ``customer_history``.
     """
-    return request.model_dump()
+    payload = request.model_dump()
+    if customer_id is not None:
+        payload["customer_id"] = customer_id
+    return payload
 
 
 def _maybe_create_alert(
@@ -214,6 +232,7 @@ def _maybe_create_alert(
     transaction_id: str,
     request: TransactionCreate,
     explanation: MLExplanation | None,
+    customer_id: str | None = None,
 ) -> AlertSummary | None:
     """Create an OPEN alert if the transaction decision is HOLD.
 
@@ -247,6 +266,7 @@ def _maybe_create_alert(
     try:
         alert = _alert_repo.create(
             transaction_id=transaction_id,
+            customer_id=customer_id,
             risk_score=ml_result.risk_score or 0,
             risk_level=ml_result.risk_level or "HIGH",
             decision=ml_result.decision,
