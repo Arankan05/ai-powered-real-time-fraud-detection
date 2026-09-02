@@ -163,11 +163,11 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 
 ## Status
 
-**Step 41 (Customer identity isolation) is complete.** Server-side
-customer identity enforcement is in place: the authenticated user's
-`customer_id` is injected into ML payloads and alert records, preventing
-cross-customer data leakage. The `users` and `alerts` tables are live in
-PostgreSQL; remaining tables are pending development. JWT authentication
-(Step 39), alert system (Step 38), risk aggregation (Step 34), rule
-signals (Step 33), outcome feedback (Step 32), and historical features
-(Step 31) are all complete.
+**Step 42 (ML service production hardening) is complete.** The ML service
+now has separate liveness/readiness probes, hardened input validation,
+thread-safe SHAP explanation, controlled error handling (no information
+leakage), model output validation, and a global exception handler.
+Step 41 (customer identity isolation), Step 40 (PostgreSQL migration),
+Step 39 (JWT auth), Step 38 (alert system), Step 34 (risk aggregation),
+Step 33 (rule signals), Step 32 (outcome feedback), and Step 31
+(historical features) are all complete.

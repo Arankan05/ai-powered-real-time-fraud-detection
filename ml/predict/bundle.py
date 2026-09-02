@@ -32,6 +32,14 @@ import numpy as np
 
 from ml.models.baseline import PreprocessingArtifacts
 
+
+# ── Exceptions ────────────────────────────────────────────────────────
+
+
+class ModelLoadError(Exception):
+    """Raised when a model bundle cannot be loaded or is invalid."""
+
+
 # ── Default paths ─────────────────────────────────────────────────────
 
 _DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
@@ -121,21 +129,38 @@ def load_bundle(path: str | Path | None = None) -> ModelBundle:
 
     if not path.exists():
         raise FileNotFoundError(
-            f"Model artifact not found: {path}. "
-            f"Run `python -m ml.predict.save_model` to generate it."
+            "Model artifact not found. "
+            "Run `python -m ml.predict.save_model` to generate it."
         )
 
-    payload = joblib.load(path)
+    try:
+        payload = joblib.load(path)
+    except Exception as exc:
+        raise ModelLoadError(
+            f"Model artifact is corrupt or unreadable: {type(exc).__name__}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise ModelLoadError(
+            "Model artifact has invalid format (expected a mapping)."
+        )
 
     required_keys = {"model", "preprocessing", "threshold", "feature_names"}
     missing = required_keys - set(payload.keys())
     if missing:
-        raise KeyError(
+        raise ModelLoadError(
             f"Model artifact is missing required keys: {sorted(missing)}"
         )
 
+    # Validate model object has predict_proba (basic sanity check)
+    model = payload["model"]
+    if not hasattr(model, "predict_proba"):
+        raise ModelLoadError(
+            "Model artifact does not contain a valid classifier (missing predict_proba)."
+        )
+
     return ModelBundle(
-        model=payload["model"],
+        model=model,
         preprocessing=payload["preprocessing"],
         threshold=float(payload["threshold"]),
         feature_names=list(payload["feature_names"]),
