@@ -17,7 +17,7 @@ import logging
 import uuid as _uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from backend.schemas import (
     AlertSummary,
@@ -28,6 +28,7 @@ from backend.schemas import (
     TransactionCreate,
     TransactionResponse,
 )
+from backend.security.deps import get_current_user, require_roles
 from backend.services.ml_client import (
     MLServiceClient,
     MLServiceResponseError,
@@ -38,6 +39,17 @@ from backend.services.ml_client import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["transactions"])
+
+# POST /transactions requires authentication (contract: "Auth required
+# (customer)").  During this integration phase any active authenticated
+# user (customer / fraud_analyst / admin) may submit transactions so
+# analysts can exercise the full fraud-detection flow; no customer
+# identity is injected into the ML payload yet, so nothing about the
+# fraud scoring changes.
+_require_authenticated = get_current_user
+
+# Label feedback mutates ML training data — analyst/admin only.
+_require_feedback_role = require_roles("fraud_analyst", "admin")
 
 # Module-level client — replaced at app startup via dependency injection
 # or direct assignment.  Default: localhost:8001 with 5 s timeout.
@@ -77,7 +89,10 @@ def get_ml_client() -> MLServiceClient:
     response_model=TransactionResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_transaction(request: TransactionCreate) -> TransactionResponse:
+async def create_transaction(
+    request: TransactionCreate,
+    current_user: dict = Depends(_require_authenticated),
+) -> TransactionResponse:
     """Submit a transaction and run fraud detection.
 
     1. Validate the raw transaction (Pydantic).
@@ -85,7 +100,8 @@ async def create_transaction(request: TransactionCreate) -> TransactionResponse:
     3. Call the ML / Fraud Intelligence Service.
     4. Merge fraud results into the transaction response.
 
-    Returns 503 if the ML service is unavailable.
+    Requires a valid Bearer token.  Returns 503 if the ML service is
+    unavailable.
     """
     client = get_ml_client()
 
@@ -267,6 +283,7 @@ def _maybe_create_alert(
 )
 async def update_transaction_outcome(
     request: OutcomeUpdate,
+    current_user: dict = Depends(_require_feedback_role),
 ) -> OutcomeResponse:
     """Update the fraud outcome of a previously recorded transaction.
 

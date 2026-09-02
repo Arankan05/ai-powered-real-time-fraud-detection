@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.db.alert_repository import (
     VALID_STATUSES,
@@ -26,10 +26,15 @@ from backend.schemas import (
     MLExplanation,
     TransactionSummary,
 )
+from backend.security.deps import require_roles
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["alerts"])
+
+# Alert investigation is restricted to fraud analysts and admins
+# (contract §Alert Endpoints).
+_require_analyst = require_roles("fraud_analyst", "admin")
 
 # Module-level repository — set at app startup
 _alert_repo: AlertRepository | None = None
@@ -105,6 +110,7 @@ def list_alerts(
     ),
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(20, ge=1, le=100, description="Items per page"),
+    current_user: dict = Depends(_require_analyst),
 ) -> AlertListResponse:
     """List fraud alerts with optional filtering and pagination."""
     repo = get_alert_repository()
@@ -139,7 +145,10 @@ def list_alerts(
 
 
 @router.get("/alerts/{alert_id}", response_model=AlertResponse)
-def get_alert(alert_id: str) -> AlertResponse:
+def get_alert(
+    alert_id: str,
+    current_user: dict = Depends(_require_analyst),
+) -> AlertResponse:
     """Get a single alert by ID with full details."""
     repo = get_alert_repository()
     alert = repo.get_by_id(alert_id)
@@ -152,7 +161,11 @@ def get_alert(alert_id: str) -> AlertResponse:
 
 
 @router.patch("/alerts/{alert_id}", response_model=AlertResponse)
-def update_alert(alert_id: str, request: AlertUpdate) -> AlertResponse:
+def update_alert(
+    alert_id: str,
+    request: AlertUpdate,
+    current_user: dict = Depends(_require_analyst),
+) -> AlertResponse:
     """Update alert status and/or analyst notes.
 
     Valid status transitions:
@@ -162,6 +175,9 @@ def update_alert(alert_id: str, request: AlertUpdate) -> AlertResponse:
 
     When status changes to RESOLVED or DISMISSED, ``resolved_at`` is
     set automatically.
+
+    ``analyst_id`` is always taken from the authenticated user — it
+    cannot be supplied or overridden by the client.
     """
     # At least one field must be provided
     if request.status is None and request.notes is None:
@@ -185,6 +201,7 @@ def update_alert(alert_id: str, request: AlertUpdate) -> AlertResponse:
             alert_id,
             new_status=request.status,
             notes=request.notes,
+            analyst_id=current_user["id"],
         )
         if updated is None:
             # Either alert not found or invalid transition
@@ -213,6 +230,7 @@ def update_alert(alert_id: str, request: AlertUpdate) -> AlertResponse:
             alert_id,
             new_status=existing["status"],
             notes=request.notes,
+            analyst_id=current_user["id"],
         )
         if updated is None:
             raise HTTPException(

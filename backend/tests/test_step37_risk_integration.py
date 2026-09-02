@@ -138,7 +138,7 @@ def valid_transaction() -> dict:
 
 
 @pytest.fixture
-def test_client():
+def test_client(auth_override):
     """FastAPI TestClient with ML client configured."""
     from fastapi.testclient import TestClient
     from backend.app import app
@@ -429,7 +429,7 @@ class TestMLFailureScenarios:
         assert data["timestamp"] is None
         assert data["explanation"] is None
 
-    def test_ml_no_client_configured(self, valid_transaction):
+    def test_ml_no_client_configured(self, valid_transaction, auth_override):
         """ML client not configured → 503."""
         from fastapi.testclient import TestClient
         from backend.app import app
@@ -734,7 +734,7 @@ class TestEndToEndFlow:
         except (ConnectionRefusedError, OSError):
             pytest.skip("ML service not running on localhost:8001")
 
-    def test_e2e_complete_flow(self):
+    def test_e2e_complete_flow(self, auth_override):
         """POST /api/v1/transactions → Backend → ML → full risk result."""
         from fastapi.testclient import TestClient
         from backend.app import app

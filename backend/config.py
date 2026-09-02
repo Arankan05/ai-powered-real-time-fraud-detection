@@ -31,6 +31,20 @@ class Settings(BaseSettings):
     # ── Alert persistence ─────────────────────────────────────────────
     ALERT_DB_PATH: str = "data/alerts.db"
 
+    # ── Authentication (JWT) ──────────────────────────────────────────
+    # SECURITY: the default secret is for LOCAL DEVELOPMENT ONLY.
+    # Production deployments MUST override BACKEND_SECRET_KEY with a
+    # strong random value, e.g.:
+    #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+    BACKEND_SECRET_KEY: str = "dev-insecure-secret-change-me-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    # Contract: login response expires_in = 1800 seconds
+    BACKEND_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # ── User persistence ──────────────────────────────────────────────
+    USER_DB_PATH: str = "data/users.db"
+
 
 def get_settings() -> Settings:
     """Return a cached Settings instance."""

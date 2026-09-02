@@ -122,7 +122,7 @@ def ml_approve_response() -> dict:
 
 
 @pytest.fixture
-def test_client():
+def test_client(auth_override):
     """TestClient with ML client + in-memory alert store configured."""
     from fastapi.testclient import TestClient
     from backend.app import app
@@ -1039,7 +1039,7 @@ class TestLiveEndToEnd:
         except (ConnectionRefusedError, OSError):
             pytest.skip("ML service not running on localhost:8001")
 
-    def test_live_full_lifecycle(self, tmp_path):
+    def test_live_full_lifecycle(self, tmp_path, auth_override):
         """Live: POST → HOLD → OPEN alert → IN_REVIEW → RESOLVED."""
         from fastapi.testclient import TestClient
         from backend.app import app

@@ -6,6 +6,21 @@ PostgreSQL is the single source of truth. Schema is managed exclusively via Alem
 
 No real banking or customer data is ever stored. All data is synthetic or derived from legitimate public datasets.
 
+### Current persistence phase (SQLite)
+
+Until the PostgreSQL/Alembic infrastructure is stood up, the backend
+implements the `users` and `alerts` tables in **SQLite** (WAL mode;
+`USER_DB_PATH`, `ALERT_DB_PATH` — see `.env.example`), following the
+column shapes defined below. Notable interim simplifications:
+
+* `users.address` is stored on the user record (the `customers` table
+  does not exist yet).
+* `updated_at` is not tracked on `users`.
+* Both repositories are behind `Protocol` interfaces
+  (`backend/db/user_repository.py`, `backend/db/alert_repository.py`)
+  so the PostgreSQL implementation can be swapped in without router
+  changes.
+
 ## Entity Relationship Diagram
 
 ```

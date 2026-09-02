@@ -198,7 +198,7 @@ class TestTransactionEndpoint:
     """Integration tests for POST /api/v1/transactions using TestClient."""
 
     @pytest.fixture
-    def test_client(self):
+    def test_client(self, auth_override):
         """Create a TestClient with a mocked ML client."""
         from fastapi.testclient import TestClient
         from backend.app import app
@@ -302,7 +302,7 @@ class TestTransactionEndpoint:
         resp = test_client.post("/api/v1/transactions", json=bad)
         assert resp.status_code == 422
 
-    def test_transaction_no_ml_client(self, valid_transaction):
+    def test_transaction_no_ml_client(self, valid_transaction, auth_override):
         """No ML client configured returns 503."""
         from fastapi.testclient import TestClient
         from backend.app import app

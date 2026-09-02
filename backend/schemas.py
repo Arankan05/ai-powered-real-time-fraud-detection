@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 # ── Transaction request ───────────────────────────────────────────────
@@ -222,3 +222,81 @@ class OutcomeResponse(BaseModel):
     customer_id: str = Field(..., description="Customer identifier")
     timestamp: int = Field(..., description="Transaction timestamp that was updated")
     is_fraud: int = Field(..., description="New fraud label value")
+
+
+# ── Authentication (Step 39) ──────────────────────────────────────
+
+
+# Contract: min 8, max 128 chars, at least 1 uppercase, 1 lowercase, 1 digit
+# (enforced in password_complexity below — Pydantic's regex engine does
+# not support look-around assertions.)
+
+
+class RegisterRequest(BaseModel):
+    """``POST /api/v1/auth/register`` request (contract §Authentication)."""
+
+    email: EmailStr = Field(..., max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    phone: str | None = Field(None, max_length=30)
+    date_of_birth: str | None = Field(None, max_length=10)
+    address: str | None = Field(None, max_length=255)
+
+    @field_validator("password")
+    @classmethod
+    def password_complexity(cls, value: str) -> str:
+        """Contract: at least 1 uppercase, 1 lowercase, and 1 digit."""
+        if not any(c.islower() for c in value):
+            raise ValueError("password must contain at least one lowercase letter")
+        if not any(c.isupper() for c in value):
+            raise ValueError("password must contain at least one uppercase letter")
+        if not any(c.isdigit() for c in value):
+            raise ValueError("password must contain at least one digit")
+        return value
+
+
+class UserResponse(BaseModel):
+    """Registration response (201) — never includes the password."""
+
+    id: str
+    email: str
+    first_name: str | None = None
+    last_name: str | None = None
+    role: str
+    customer_id: str | None = None
+
+
+class LoginRequest(BaseModel):
+    """``POST /api/v1/auth/login`` request."""
+
+    email: EmailStr = Field(..., max_length=255)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class TokenResponse(BaseModel):
+    """JWT token pair returned by login and refresh."""
+
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int = Field(..., description="Access token lifetime (seconds)")
+
+
+class RefreshRequest(BaseModel):
+    """``POST /api/v1/auth/refresh`` request."""
+
+    refresh_token: str = Field(..., min_length=1)
+
+
+class MeResponse(BaseModel):
+    """``GET /api/v1/auth/me`` response."""
+
+    id: str
+    email: str
+    first_name: str | None = None
+    last_name: str | None = None
+    role: str
+    customer_id: str | None = None
+    is_active: bool
+    created_at: str
