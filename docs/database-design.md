@@ -354,7 +354,24 @@ The API exposes `explanation` (camelCase-friendly); the database column is `expl
 
 ## Status
 
-**Step 43 (ML monitoring and observability) is complete.** No database
-schema changes were required for Step 43. The `users` and `alerts`
-tables remain in PostgreSQL with idempotent schema init (Steps 40–41).
-Remaining tables are designed but not yet implemented.
+**Step 44 (production decision pipeline) is complete.** New
+`idempotency_keys` table added for PostgreSQL-backed idempotency:
+
+```
+idempotency_keys
+├─ id              UUID PK
+├─ customer_id     UUID NOT NULL
+├─ idempotency_key VARCHAR(255) NOT NULL
+├─ status          VARCHAR(20) DEFAULT 'processing'
+│                  CHECK (status IN ('processing','completed','failed'))
+├─ transaction_id  UUID (nullable)
+├─ response_json   JSONB (cached response for replay)
+├─ created_at      TIMESTAMPTZ
+├─ updated_at      TIMESTAMPTZ
+└─ UNIQUE (customer_id, idempotency_key)
+```
+
+Indexes: `uq_idempotency_customer_key` (unique composite),
+`ix_idempotency_keys_created_at`. Schema is idempotently created
+alongside `users` and `alerts` tables. The `users` and `alerts`
+tables remain unchanged.

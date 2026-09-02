@@ -156,5 +156,5 @@ A task is considered complete when:
 
 ## Status
 
-This workflow is agreed upon. Development is in progress (Step 43
-ML monitoring and observability complete; Steps 31–42 complete).
+This workflow is agreed upon. Development is in progress (Step 44
+production decision pipeline complete; Steps 31–43 complete).

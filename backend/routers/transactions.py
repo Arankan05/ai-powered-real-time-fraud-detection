@@ -4,9 +4,8 @@ Accepts a raw transaction, calls the ML / Fraud Intelligence Service
 for fraud scoring, and returns the enriched response including ML
 predictions, SHAP explanations, and risk decisions.
 
-This module wires the :class:`MLServiceClient` into the transaction
-flow.  Authentication and database persistence are placeholder
-stubs that will be completed by the backend developer (Developer A).
+Step 44: idempotent transaction processing via an optional
+``Idempotency-Key`` request header and explicit ML failure handling.
 
 Architecture reference: ``docs/api-contract.md`` L142–L234.
 """
@@ -17,7 +16,7 @@ import logging
 import uuid as _uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 
 from backend.schemas import (
     AlertSummary,
@@ -62,6 +61,9 @@ _ml_client: MLServiceClient | None = None
 # Alert repository — set at app startup
 _alert_repo = None
 
+# Step 44: idempotency store — set at app startup
+_idempotency_store = None
+
 
 def set_ml_client(client: MLServiceClient) -> None:
     """Set the ML service client (called during app startup)."""
@@ -75,6 +77,12 @@ def set_alert_repository(repo: Any) -> None:
     _alert_repo = repo
 
 
+def set_idempotency_store(store: Any) -> None:
+    """Set the idempotency store (called during app startup)."""
+    global _idempotency_store
+    _idempotency_store = store
+
+
 def get_ml_client() -> MLServiceClient:
     """Return the active ML service client."""
     if _ml_client is None:
@@ -83,6 +91,39 @@ def get_ml_client() -> MLServiceClient:
             detail="ML service client not configured.",
         )
     return _ml_client
+
+
+# ── Idempotency-key validation ────────────────────────────────────────
+
+
+def _validate_idempotency_key(raw_key: str | None) -> str | None:
+    """Validate and normalise an optional idempotency key.
+
+    Returns the trimmed key or ``None``.  Raises :class:`HTTPException`
+    (422) for keys that are empty-whitespace-only, too long, or contain
+    control characters.
+    """
+    if raw_key is None:
+        return None
+    trimmed = raw_key.strip()
+    if not trimmed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key must not be empty.",
+        )
+    if len(trimmed) > 255:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key must be at most 255 characters.",
+        )
+    # Reject control characters (0x00–0x1F) that could interfere with
+    # storage or logging.
+    if any(ord(ch) < 0x20 for ch in trimmed):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key contains invalid characters.",
+        )
+    return trimmed
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────
@@ -96,16 +137,21 @@ def get_ml_client() -> MLServiceClient:
 async def create_transaction(
     request: TransactionCreate,
     current_user: dict = Depends(_require_authenticated),
+    response: Response = None,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> TransactionResponse:
     """Submit a transaction and run fraud detection.
 
     1. Validate the raw transaction (Pydantic).
-    2. Build the ML service payload from the transaction fields.
-    3. Call the ML / Fraud Intelligence Service.
-    4. Merge fraud results into the transaction response.
+    2. Check idempotency (if key provided) — return cached result for
+       duplicate requests.
+    3. Build the ML service payload from the transaction fields.
+    4. Call the ML / Fraud Intelligence Service.
+    5. Merge fraud results into the transaction response.
 
     Requires a valid Bearer token.  Returns 503 if the ML service is
-    unavailable.
+    unavailable (Step 44: explicit failure state, no fabricated
+    predictions).
     """
     client = get_ml_client()
 
@@ -113,35 +159,87 @@ async def create_transaction(
     # The server controls this value — the client cannot forge it.
     customer_id = current_user.get("customer_id")
 
+    # Step 44: validate idempotency key
+    key = _validate_idempotency_key(idempotency_key)
+
+    # Generate transaction ID early — needed for both success and failure
+    transaction_id = str(_uuid.uuid4())
+
+    # ── Idempotency check ─────────────────────────────────────────
+    if key is not None and _idempotency_store is not None:
+        record = _idempotency_store.try_reserve(customer_id, key)
+        if record is not None:
+            if record.status == "completed":
+                # Duplicate request — return cached result
+                cached = record.response_json
+                if cached is not None:
+                    if isinstance(cached, str):
+                        import json
+                        cached = json.loads(cached)
+                    if response is not None:
+                        response.status_code = status.HTTP_200_OK
+                    logger.info(
+                        "Idempotent replay: key=%s customer=%s",
+                        key, customer_id,
+                    )
+                    return TransactionResponse.model_validate(cached)
+
+            elif record.status == "processing":
+                # Another request with the same key is being processed
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Request with this idempotency key is being processed.",
+                )
+
+            # status == "failed": previous attempt failed — allow retry
+            # by re-reserving (the record still exists; we just proceed
+            # and will update it on success/failure).
+
     # Build the payload for the ML service.
-    # The current ML service expects 24 engineered features.
-    # In the full integration the ML service will accept raw
-    # transaction data and compute features internally.
+    # Exclude the idempotency_key from the ML payload — it is a
+    # client-side duplicate-prevention key, not a transaction feature.
     ml_payload = _build_ml_payload(request, customer_id=customer_id)
 
-    # Call ML service
+    # Call ML service — explicit failure handling (Step 44)
+    ml_result: MLPredictionResponse | None = None
     try:
-        ml_result: MLPredictionResponse = await client.predict(ml_payload)
+        ml_result = await client.predict(ml_payload)
     except MLServiceUnavailableError as exc:
         logger.error("ML service unavailable: %s", exc)
-        raise HTTPException(
+        return _handle_ml_failure(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            request=request,
+            key=key,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="ML fraud detection service is unavailable.",
         )
     except MLServiceTimeoutError as exc:
         logger.error("ML service timeout: %s", exc)
-        raise HTTPException(
+        return _handle_ml_failure(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            request=request,
+            key=key,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="ML fraud detection service timed out.",
         )
     except MLServiceResponseError as exc:
         logger.error("ML service error: %s", exc)
         if exc.status_code == 503:
-            raise HTTPException(
+            return _handle_ml_failure(
+                transaction_id=transaction_id,
+                customer_id=customer_id,
+                request=request,
+                key=key,
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="ML model not available.",
             )
-        raise HTTPException(
+        return _handle_ml_failure(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            request=request,
+            key=key,
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="ML fraud detection returned an error.",
         )
@@ -161,9 +259,6 @@ async def create_transaction(
             ml_top_factors=list(ml_result.explanation),
         )
 
-    # Generate a transaction identifier for this request
-    transaction_id = str(_uuid.uuid4())
-
     # Create alert if decision is HOLD (high-risk transaction)
     alert_summary = _maybe_create_alert(
         ml_result=ml_result,
@@ -173,7 +268,8 @@ async def create_transaction(
         customer_id=customer_id,
     )
 
-    return TransactionResponse(
+    txn_response = TransactionResponse(
+        transaction_id=transaction_id,
         amount=request.amount,
         currency=request.currency,
         merchant_name=request.merchant_name,
@@ -200,7 +296,43 @@ async def create_transaction(
         model_version=ml_result.model_version,
         timestamp=ml_result.timestamp,
         alert=alert_summary,
+        # Step 44: idempotency metadata
+        idempotent=(key is not None),
     )
+
+    # Step 44: cache successful result in idempotency store
+    if key is not None and _idempotency_store is not None:
+        _idempotency_store.mark_completed(
+            customer_id,
+            key,
+            transaction_id,
+            txn_response.model_dump(mode="json"),
+        )
+
+    return txn_response
+
+
+# ── ML failure handler ─────────────────────────────────────────────────
+
+
+def _handle_ml_failure(
+    *,
+    transaction_id: str,
+    customer_id: str | None,
+    request: TransactionCreate,
+    key: str | None,
+    status_code: int,
+    detail: str,
+) -> None:
+    """Mark idempotency record as failed, then raise HTTPException.
+
+    Raises :class:`HTTPException` — this function never returns.
+    The idempotency record is marked "failed" so future retries with
+    the same key are allowed.
+    """
+    if key is not None and _idempotency_store is not None:
+        _idempotency_store.mark_failed(customer_id, key)
+    raise HTTPException(status_code=status_code, detail=detail)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -217,10 +349,10 @@ def _build_ml_payload(
     authenticated user) so the ML service can look up the correct
     customer history.  The client cannot supply or override this value.
 
-    When the backend includes customer history look-up, that data
-    will be added here as ``customer_history``.
+    Step 44: excludes ``idempotency_key`` from the ML payload — it is
+    a client-side duplicate-prevention key, not a transaction feature.
     """
-    payload = request.model_dump()
+    payload = request.model_dump(exclude={"idempotency_key"})
     if customer_id is not None:
         payload["customer_id"] = customer_id
     return payload

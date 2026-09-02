@@ -43,6 +43,7 @@ from backend.routers.auth import router as auth_router
 from backend.routers.transactions import (
     router as transactions_router,
     set_alert_repository as set_txn_alert_repo,
+    set_idempotency_store as set_txn_idempotency_store,
     set_ml_client,
 )
 from backend.security.deps import set_user_repository
@@ -78,6 +79,12 @@ def _init_sqlite() -> None:
     except Exception as exc:
         logger.warning("SQLite user store unavailable (%s); authentication disabled", exc)
 
+    # Step 44: idempotency store — in-memory for SQLite mode
+    from backend.db.idempotency_store import InMemoryIdempotencyStore
+    _idempotency = InMemoryIdempotencyStore()
+    set_txn_idempotency_store(_idempotency)
+    logger.info("Idempotency store: in-memory")
+
 
 def _init_postgres() -> None:
     """Set up the PostgreSQL-backed repositories (fail-fast).
@@ -112,6 +119,12 @@ def _init_postgres() -> None:
     set_alert_repository(_alert_repo)
     set_txn_alert_repo(_alert_repo)
     set_user_repository(_user_repo)
+
+    # Step 44: idempotency store — PostgreSQL-backed
+    from backend.db.idempotency_store import PostgresIdempotencyStore
+    _idempotency = PostgresIdempotencyStore(_pg_pool)
+    set_txn_idempotency_store(_idempotency)
+
     logger.info(
         "Persistence: PostgreSQL (host=%s port=%s db=%s)",
         settings.POSTGRES_HOST, settings.POSTGRES_PORT, settings.POSTGRES_DB,

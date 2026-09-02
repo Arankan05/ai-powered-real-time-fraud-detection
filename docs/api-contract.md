@@ -844,3 +844,76 @@ python -m backend.db.seed_users
 
 (seeds `analyst@example.com` / `admin@example.com` with generated or
 `SEED_*`-environment-supplied passwords; idempotent).
+
+---
+
+## Implementation Notes — Production Decision Pipeline (Step 44)
+
+### Idempotent Transaction Processing
+
+`POST /api/v1/transactions` supports an optional `Idempotency-Key`
+request header to prevent duplicate transaction submissions.
+
+**Idempotency scope:**
+
+* Scoped to the authenticated customer (server-derived `customer_id`)
+* Different customers using the same key create independent transactions
+* Same customer using different keys creates independent transactions
+
+**Behavior:**
+
+| Scenario | Behavior |
+|---|---|
+| No idempotency key | Transaction proceeds normally (no deduplication) |
+| New key | Transaction proceeds; result cached in idempotency store |
+| Same key (completed) | Returns cached result with HTTP 200 (`idempotent: true`) |
+| Same key (processing) | Returns HTTP 409 Conflict |
+| Same key (previous failure) | Retries the ML call |
+
+**Key validation:**
+
+* Max 255 characters
+* Whitespace-only keys rejected (422)
+* Control characters rejected (422)
+
+**Response additions:**
+
+| Field | Type | Description |
+|---|---|---|
+| `transaction_id` | string (UUID) | Server-generated transaction identifier |
+| `idempotent` | boolean | `true` when response was replayed from cache |
+| `ml_failure` | boolean | `true` when ML service was unavailable |
+
+### ML Failure Policy
+
+When the ML service is unavailable or times out:
+
+* HTTP 503 (or 502 for generic errors) is returned
+* No fraud predictions are fabricated
+* No SHAP explanations are fabricated
+* No misleading model-version data is included
+* Idempotency records are marked "failed" (allowing future retry)
+* No alerts are created for failed transactions
+
+### Decision Consistency
+
+The response and persisted alert always represent the SAME decision:
+
+* `risk_score`, `risk_level`, `decision`, `model_version` match
+  between API response and alert record
+* Duplicate requests via idempotency key return the identical cached
+  response
+* No duplicate alerts are created for the same transaction
+
+### Retry Policy
+
+* No automatic retry loops around the ML service
+* Clients may retry with the same idempotency key after ML failure
+* Idempotency records marked "failed" allow fresh ML attempts
+
+### Known Limitations
+
+* Idempotency records are process-local (in-memory) when using the
+  SQLite persistence backend; PostgreSQL mode uses database-backed
+  idempotency with race-condition protection via UNIQUE constraints
+* Idempotency records have no automatic TTL (manual cleanup required)

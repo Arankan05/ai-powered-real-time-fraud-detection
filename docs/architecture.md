@@ -163,9 +163,10 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 
 ## Status
 
-**Step 43 (ML monitoring and observability) is complete.** The ML
-service now tracks prediction metrics, latency, error categories,
-and drift signals via a thread-safe in-process aggregator exposed
-through `GET /metrics`. Step 42 (production hardening), Step 41
-(customer identity isolation), Step 40 (PostgreSQL migration),
-and all earlier steps are complete.
+**Step 44 (production decision pipeline) is complete.** The transaction
+endpoint now supports idempotent processing via `Idempotency-Key`
+header, explicit ML failure handling (no fabricated predictions),
+and decision consistency between response and persisted alerts.
+Step 43 (ML monitoring and observability), Step 42 (production
+hardening), Step 41 (customer identity isolation), Step 40
+(PostgreSQL migration), and all earlier steps are complete.

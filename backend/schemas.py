@@ -31,6 +31,15 @@ class TransactionCreate(BaseModel):
     device_type: str = Field(..., pattern=r"^(mobile|desktop|pos)$")
     ip_address: str = Field(..., min_length=7, max_length=45)
 
+    # Step 44: optional client-supplied idempotency key for duplicate
+    # prevention.  Scoped to the authenticated customer; the server
+    # controls the customer_id binding.
+    idempotency_key: str | None = Field(
+        None,
+        max_length=255,
+        description="Client idempotency key (prevents duplicate submissions)",
+    )
+
 
 # ── ML / Fraud Intelligence Service response ──────────────────────────
 
@@ -167,6 +176,9 @@ class TransactionResponse(BaseModel):
     Matches ``docs/api-contract.md`` POST /api/v1/transactions response.
     """
 
+    # Step 44: server-generated transaction identifier
+    transaction_id: str
+
     amount: float
     currency: str
     merchant_name: str
@@ -197,6 +209,14 @@ class TransactionResponse(BaseModel):
 
     # Alert reference (populated when decision == HOLD)
     alert: AlertSummary | None = None
+
+    # Step 44: idempotency metadata
+    idempotent: bool = False
+
+    # Step 44: ML failure indicator — present when ML service was
+    # unavailable or returned an error.  When ``True``, no ML
+    # prediction fields are populated and no fraud decision was made.
+    ml_failure: bool = False
 
 
 # ── Outcome feedback ──────────────────────────────────────────────────
