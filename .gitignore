@@ -73,6 +73,12 @@ ml/datasets/processed/
 ml/notebooks/.ipynb_checkpoints/
 *.ipynb_checkpoints/
 
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+/data/
+
 # Logs
 logs/
 *.log
