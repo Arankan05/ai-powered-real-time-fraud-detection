@@ -710,6 +710,22 @@ Role escalation through the public API is impossible: registration
   **401** with an identical body for unknown email and wrong password
   (no account enumeration); inactive accounts receive **403**.
 
+### Customer identity enforcement (Step 41)
+
+* `customer_id` in transaction and alert responses is derived
+  server-side from the authenticated user's JWT (`sub` → user record
+  → `customer_id`).  The client cannot supply or override it.
+* `TransactionCreate` has no `customer_id` field — it is not part of
+  the request contract.
+* The backend injects the authenticated `customer_id` into the ML
+  service payload so customer-specific historical features use the
+  correct identity.
+* Alerts created from HOLD decisions carry the authenticated
+  customer's `customer_id`.
+* `PATCH /transactions/outcome` remains analyst/admin only; the
+  endpoint accepts `customer_id` in the request body (analysts label
+  any customer's transactions).
+
 ### Configuration
 
 See `.env.example`. Key variables: `BACKEND_SECRET_KEY` (JWT signing
