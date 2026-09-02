@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     BACKEND_PORT: int = 8000
     BACKEND_CORS_ORIGINS: str = "http://localhost:5173"
 
+    # ── Alert persistence ─────────────────────────────────────────────
+    ALERT_DB_PATH: str = "data/alerts.db"
+
 
 def get_settings() -> Settings:
     """Return a cached Settings instance."""

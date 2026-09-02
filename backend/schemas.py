@@ -92,6 +92,71 @@ class MLPredictionResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+# ── Alert schemas ────────────────────────────────────────────────────
+
+
+class AlertSummary(BaseModel):
+    """Compact alert reference embedded in TransactionResponse."""
+
+    id: str
+    status: str
+    created_at: str
+
+
+class TransactionSummary(BaseModel):
+    """Compact transaction summary embedded in alert list responses."""
+
+    amount: float | None = None
+    currency: str | None = None
+    merchant_name: str | None = None
+    transaction_type: str | None = None
+    timestamp: int | None = None
+
+
+class AlertResponse(BaseModel):
+    """Full alert response for GET /api/v1/alerts endpoints."""
+
+    id: str
+    transaction_id: str
+    risk_score: int
+    risk_level: str
+    decision: str
+    status: str
+    analyst_id: str | None = None
+    notes: str | None = None
+    created_at: str
+    updated_at: str | None = None
+    resolved_at: str | None = None
+    # Optional detail fields (present in detail endpoint)
+    fraud_probability: float | None = None
+    model_version: str | None = None
+    risk_factors: list[str] | None = None
+    explanation: MLExplanation | None = None
+    transaction_summary: TransactionSummary | None = None
+
+
+class AlertUpdate(BaseModel):
+    """Request body for PATCH /api/v1/alerts/{id}."""
+
+    status: str | None = Field(
+        None,
+        description="New status: IN_REVIEW, RESOLVED, or DISMISSED",
+    )
+    notes: str | None = Field(
+        None,
+        description="Analyst notes",
+    )
+
+
+class AlertListResponse(BaseModel):
+    """Paginated list of alerts."""
+
+    items: list[AlertResponse]
+    total: int
+    page: int
+    per_page: int
+
+
 # ── Transaction response ──────────────────────────────────────────────
 
 
@@ -125,6 +190,9 @@ class TransactionResponse(BaseModel):
     fraud_probability: float | None = None
     fraud_prediction: int | None = None
     timestamp: int | None = None
+
+    # Alert reference (populated when decision == HOLD)
+    alert: AlertSummary | None = None
 
 
 # ── Outcome feedback ──────────────────────────────────────────────────

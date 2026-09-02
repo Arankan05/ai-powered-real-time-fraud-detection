@@ -14,11 +14,13 @@ Architecture reference: ``docs/api-contract.md`` L142–L234.
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 
 from backend.schemas import (
+    AlertSummary,
     MLExplanation,
     MLPredictionResponse,
     OutcomeResponse,
@@ -41,11 +43,20 @@ router = APIRouter(prefix="/api/v1", tags=["transactions"])
 # or direct assignment.  Default: localhost:8001 with 5 s timeout.
 _ml_client: MLServiceClient | None = None
 
+# Alert repository — set at app startup
+_alert_repo = None
+
 
 def set_ml_client(client: MLServiceClient) -> None:
     """Set the ML service client (called during app startup)."""
     global _ml_client
     _ml_client = client
+
+
+def set_alert_repository(repo: Any) -> None:
+    """Set the alert repository (called during app startup)."""
+    global _alert_repo
+    _alert_repo = repo
 
 
 def get_ml_client() -> MLServiceClient:
@@ -126,6 +137,17 @@ async def create_transaction(request: TransactionCreate) -> TransactionResponse:
             ml_top_factors=list(ml_result.explanation),
         )
 
+    # Generate a transaction identifier for this request
+    transaction_id = str(_uuid.uuid4())
+
+    # Create alert if decision is HOLD (high-risk transaction)
+    alert_summary = _maybe_create_alert(
+        ml_result=ml_result,
+        transaction_id=transaction_id,
+        request=request,
+        explanation=explanation,
+    )
+
     return TransactionResponse(
         amount=request.amount,
         currency=request.currency,
@@ -150,6 +172,7 @@ async def create_transaction(request: TransactionCreate) -> TransactionResponse:
         risk_factors=ml_result.risk_factors,
         model_version=ml_result.model_version,
         timestamp=ml_result.timestamp,
+        alert=alert_summary,
     )
 
 
@@ -167,6 +190,72 @@ def _build_ml_payload(request: TransactionCreate) -> dict[str, Any]:
     will be added here as ``customer_id`` and ``customer_history``.
     """
     return request.model_dump()
+
+
+def _maybe_create_alert(
+    *,
+    ml_result: MLPredictionResponse,
+    transaction_id: str,
+    request: TransactionCreate,
+    explanation: MLExplanation | None,
+) -> AlertSummary | None:
+    """Create an OPEN alert if the transaction decision is HOLD.
+
+    Returns an :class:`AlertSummary` if an alert was created, or
+    ``None`` otherwise.  Alert creation is best-effort: a failure
+    logs a warning but never blocks the transaction response.
+    """
+    if ml_result.decision != "HOLD":
+        return None
+
+    if _alert_repo is None:
+        logger.warning(
+            "Alert repository not configured; skipping alert creation"
+        )
+        return None
+
+    # Prevent duplicate alerts for the same transaction
+    existing = _alert_repo.get_by_transaction_id(transaction_id)
+    if existing is not None:
+        return AlertSummary(
+            id=existing["id"],
+            status=existing["status"],
+            created_at=existing["created_at"],
+        )
+
+    # Build explanation dict for storage
+    expl_json = None
+    if explanation is not None:
+        expl_json = explanation.model_dump()
+
+    try:
+        alert = _alert_repo.create(
+            transaction_id=transaction_id,
+            risk_score=ml_result.risk_score or 0,
+            risk_level=ml_result.risk_level or "HIGH",
+            decision=ml_result.decision,
+            fraud_probability=ml_result.fraud_probability,
+            model_version=ml_result.model_version,
+            risk_factors=ml_result.risk_factors,
+            explanation_json=expl_json,
+            amount=request.amount,
+            currency=request.currency,
+            merchant_name=request.merchant_name,
+            transaction_type=request.transaction_type,
+            timestamp=ml_result.timestamp,
+        )
+        logger.info(
+            "Alert created: id=%s transaction=%s risk_score=%s",
+            alert["id"], transaction_id, alert["risk_score"],
+        )
+        return AlertSummary(
+            id=alert["id"],
+            status=alert["status"],
+            created_at=alert["created_at"],
+        )
+    except Exception:
+        logger.warning("Failed to create alert", exc_info=True)
+        return None
 
 
 # ── Outcome feedback endpoint ─────────────────────────────────────────
