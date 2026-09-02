@@ -1,4 +1,4 @@
-"""User repository — SQLite and in-memory implementations.
+"""User repository — SQLite, PostgreSQL, and in-memory implementations.
 
 Provides persistent storage for user accounts backing JWT
 authentication.  Passwords are hashed with bcrypt
@@ -27,6 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+import psycopg
+from psycopg import errors as pg_errors
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+
 from backend.security.passwords import hash_password
 
 # ── Role constants ────────────────────────────────────────────────────
@@ -36,6 +41,24 @@ FRAUD_ANALYST = "fraud_analyst"
 ADMIN = "admin"
 
 VALID_ROLES = frozenset({CUSTOMER, FRAUD_ANALYST, ADMIN})
+
+
+class UserAlreadyExistsError(ValueError):
+    """Raised when creating a user whose email is already registered."""
+
+
+def _coerce_uuid(value: Any) -> uuid.UUID | None:
+    """Return a UUID object for the input, or ``None`` if not parseable.
+
+    Used by the PostgreSQL repositories to translate invalid IDs into
+    not-found (404) semantics rather than surfacing raw driver errors.
+    """
+    if value is None:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 # ── Protocol ──────────────────────────────────────────────────────────
@@ -238,20 +261,23 @@ class SQLiteUserRepository:
             is_active=is_active,
         )
         with self._lock:
-            self._conn.execute(
-                """\
-                INSERT INTO users (
-                    id, email, password_hash, role, first_name, last_name,
-                    phone, date_of_birth, address, customer_id, is_active,
-                    created_at
-                ) VALUES (
-                    :id, :email, :password_hash, :role, :first_name,
-                    :last_name, :phone, :date_of_birth, :address,
-                    :customer_id, :is_active, :created_at
-                )""",
-                {**user, "is_active": 1 if user["is_active"] else 0},
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    """\
+                    INSERT INTO users (
+                        id, email, password_hash, role, first_name, last_name,
+                        phone, date_of_birth, address, customer_id, is_active,
+                        created_at
+                    ) VALUES (
+                        :id, :email, :password_hash, :role, :first_name,
+                        :last_name, :phone, :date_of_birth, :address,
+                        :customer_id, :is_active, :created_at
+                    )""",
+                    {**user, "is_active": 1 if user["is_active"] else 0},
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise UserAlreadyExistsError(user["email"]) from exc
         return user
 
     def get_by_id(self, user_id: str) -> dict[str, Any] | None:
@@ -282,3 +308,127 @@ class SQLiteUserRepository:
         if "is_active" in d:
             d["is_active"] = bool(d["is_active"])
         return d
+
+
+# ── PostgreSQL implementation ─────────────────────────────────────────
+
+
+class PostgresUserRepository:
+    """PostgreSQL-backed user repository (production persistence).
+
+    Shares a :class:`psycopg_pool.ConnectionPool` with the other
+    repositories.  Case-insensitive email uniqueness is enforced by the
+    ``uq_users_email_ci`` unique index on ``lower(email)`` (equivalent
+    of SQLite's ``COLLATE NOCASE``).
+
+    Constructing a repository automatically ensures the backing schema
+    exists via :func:`backend.db.postgres.init_schema` — idempotent.
+    """
+
+    def __init__(self, pool: ConnectionPool) -> None:
+        self._pool = pool
+        from backend.db.postgres import init_schema  # local import avoids cycle
+        init_schema(pool)
+
+    # ── UserRepository Protocol ────────────────────────────────────────
+
+    def create_user(
+        self,
+        *,
+        email: str,
+        password: str,
+        role: str = CUSTOMER,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        phone: str | None = None,
+        date_of_birth: str | None = None,
+        address: str | None = None,
+        is_active: bool = True,
+    ) -> dict[str, Any]:
+        user = _new_user_row(
+            email=email,
+            password=password,
+            role=role,
+            first_name=first_name,
+            last_name=last_name,
+            phone=phone,
+            date_of_birth=date_of_birth,
+            address=address,
+            is_active=is_active,
+        )
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """\
+                        INSERT INTO users (
+                            id, email, password_hash, role, first_name, last_name,
+                            phone, date_of_birth, address, customer_id, is_active,
+                            created_at
+                        ) VALUES (
+                            %(id)s, %(email)s, %(password_hash)s, %(role)s,
+                            %(first_name)s, %(last_name)s, %(phone)s,
+                            %(date_of_birth)s, %(address)s, %(customer_id)s,
+                            %(is_active)s, %(created_at)s
+                        )""",
+                        user,
+                    )
+        except pg_errors.UniqueViolation:
+            raise UserAlreadyExistsError(user["email"])
+        return user
+
+    def get_by_id(self, user_id: str) -> dict[str, Any] | None:
+        uid = _coerce_uuid(user_id)
+        if uid is None:
+            return None
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM users WHERE id = %s", (uid,))
+                row = cur.fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_by_email(self, email: str) -> dict[str, Any] | None:
+        normalised = email.strip().lower()
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM users WHERE lower(email) = lower(%s)",
+                    (normalised,),
+                )
+                row = cur.fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def email_exists(self, email: str) -> bool:
+        return self.get_by_email(email) is not None
+
+    # ── Internal helpers ──────────────────────────────────────────────
+
+    def close(self) -> None:
+        """Close the shared connection pool (safe to call more than once)."""
+        try:
+            self._pool.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _row_to_dict(d: dict[str, Any]) -> dict[str, Any]:
+        """Convert psycopg row types to the dict shape used by routers.
+
+        UUID fields are stringified, timestamp fields are ISO-formatted,
+        and ``is_active`` is a Python ``bool``.
+        """
+        result = dict(d)
+        for field in ("id", "customer_id"):
+            v = result.get(field)
+            if v is not None:
+                result[field] = str(v)
+        for field in ("created_at",):
+            v = result.get(field)
+            if v is not None and hasattr(v, "isoformat"):
+                result[field] = v.isoformat()
+        dob = result.get("date_of_birth")
+        if dob is not None and hasattr(dob, "isoformat"):
+            result["date_of_birth"] = dob.isoformat()
+        if "is_active" in result:
+            result["is_active"] = bool(result["is_active"])
+        return result

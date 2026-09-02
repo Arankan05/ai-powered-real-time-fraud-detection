@@ -126,8 +126,16 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 
 ### Data Layer
 
-- **PostgreSQL** stores: `users`, `customers`, `merchants`, `transactions`, `alerts`, `audit_logs`, `customer_devices`, `model_metadata`, `risk_rules_config`.
-- Schema is managed exclusively through Alembic migrations.
+- **PostgreSQL** (Step 40) stores: `users` and `alerts` (implemented).
+  Remaining tables (`customers`, `merchants`, `transactions`,
+  `audit_logs`, `customer_devices`, `model_metadata`,
+  `risk_rules_config`) are designed but not yet implemented.
+- Schema is initialised idempotently at startup via
+  `backend/db/postgres.py :: init_schema` (Alembic migrations planned
+  but not yet in use).
+- Backend supports `PERSISTENCE_BACKEND=postgres` (default) or
+  `sqlite` (legacy fallback; see `.env.example`).
+- ML historical features (`ml/features/history.py`) remain on SQLite.
 - No real banking data is used. Synthetic data and public datasets are used for development and ML training.
 
 ## Communication Patterns
@@ -136,7 +144,7 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 |---|---|---|
 | Frontend → Backend | Synchronous request/response | HTTPS (REST/JSON) |
 | Backend → ML/Fraud Service | Synchronous internal HTTP | HTTP (REST/JSON) on `ML_SERVICE_HOST:ML_SERVICE_PORT` |
-| Backend → Database | Synchronous ORM | SQLAlchemy over PostgreSQL wire |
+| Backend → Database | Synchronous SQL | psycopg 3 over PostgreSQL wire (or sqlite3 for fallback / ML history) |
 
 ## Security Architecture
 
@@ -155,4 +163,8 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 
 ## Status
 
-This architecture is agreed upon but **not yet implemented**. All components are pending development.
+**Step 40 (PostgreSQL migration) is complete.** The `users` and `alerts`
+tables are live in PostgreSQL; remaining tables are pending development.
+JWT authentication (Step 39), alert system (Step 38), risk aggregation
+(Step 34), rule signals (Step 33), outcome feedback (Step 32), and
+historical features (Step 31) are all complete.

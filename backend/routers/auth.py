@@ -37,6 +37,7 @@ from backend.schemas import (
     TokenResponse,
     UserResponse,
 )
+from backend.db.user_repository import UserAlreadyExistsError
 from backend.security.deps import get_current_user, get_user_repository
 from backend.security.jwt_utils import (
     REFRESH_TOKEN_TYPE,
@@ -90,16 +91,24 @@ async def register(request: RegisterRequest) -> UserResponse:
             detail="An account with this email already exists.",
         )
 
-    user = repo.create_user(
-        email=email,
-        password=request.password,
-        role="customer",
-        first_name=request.first_name,
-        last_name=request.last_name,
-        phone=request.phone,
-        date_of_birth=request.date_of_birth,
-        address=request.address,
-    )
+    try:
+        user = repo.create_user(
+            email=email,
+            password=request.password,
+            role="customer",
+            first_name=request.first_name,
+            last_name=request.last_name,
+            phone=request.phone,
+            date_of_birth=request.date_of_birth,
+            address=request.address,
+        )
+    except UserAlreadyExistsError:
+        # Race: a concurrent request created the account between
+        # ``email_exists`` and ``create_user``.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists.",
+        )
     logger.info("User registered: id=%s role=customer", user["id"])
 
     return UserResponse(

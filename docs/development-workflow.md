@@ -128,7 +128,7 @@ If two feature branches from different developers conflict, both developers coor
 - [ ] Code compiles/runs without errors.
 - [ ] New tests added for new logic; existing tests pass.
 - [ ] No secrets, passwords, or API keys in the diff.
-- [ ] Database changes use Alembic migrations.
+- [ ] Database changes use idempotent DDL (`backend/db/postgres.py :: init_schema`) until Alembic migrations are introduced.
 - [ ] README or docs updated if the change affects usage.
 - [ ] No mock/hard-coded data introduced as permanent fixtures.
 - [ ] API response shapes match `docs/api-contract.md`.
@@ -156,4 +156,5 @@ A task is considered complete when:
 
 ## Status
 
-This workflow is agreed upon. Development has not yet started.
+This workflow is agreed upon. Development is in progress (Step 40
+PostgreSQL migration complete; Steps 31–39 complete).

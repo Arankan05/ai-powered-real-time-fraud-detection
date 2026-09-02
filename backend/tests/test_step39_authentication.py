@@ -878,6 +878,10 @@ class TestUserPersistence:
         from backend.db import seed_users
 
         db_path = tmp_path / "seed.db"
+        # Force SQLite backend for this test — the seed tool now
+        # defaults to PostgreSQL and we want to exercise the SQLite
+        # seeding path in isolation.
+        monkeypatch.setenv("PERSISTENCE_BACKEND", "sqlite")
         monkeypatch.setenv("USER_DB_PATH", str(db_path))
         monkeypatch.setenv("SEED_ANALYST_EMAIL", "seed.analyst@example.com")
         monkeypatch.setenv("SEED_ANALYST_PASS", "SeededAnalyst1")
