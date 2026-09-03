@@ -790,6 +790,14 @@ Role escalation through the public API is impossible: registration
   "risk_levels": {"LOW": 28, "MEDIUM": 8, "HIGH": 4},
   "errors": {"validation": 1, "feature_engineering": 1, ...},
   "model_version": "fraud-xgb-v1.0.0",
+  "model_identity": {
+    "model_name": "fraud-xgb",
+    "model_version": "fraud-xgb-v1.0.0",
+    "artifact_checksum": "f12d0d2e8702...",
+    "feature_schema_version": "1.0.0",
+    "n_features": 24,
+    "status": "active"
+  },
   "latency": {
     "count": 40, "mean_seconds": 0.085,
     "p50_seconds": 0.072, "p95_seconds": 0.198, "p99_seconds": 0.310
@@ -807,6 +815,7 @@ Role escalation through the public API is impossible: registration
 * Fraud/non-fraud counts
 * Decision and risk-level distribution
 * Model version
+* Model identity (Step 46): active model name, version, artifact checksum, feature schema version
 * Drift signals (when baseline is configured)
 
 **What is NOT tracked:**

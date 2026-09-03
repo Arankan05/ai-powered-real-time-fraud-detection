@@ -186,3 +186,24 @@ bounded explanation summaries, and idempotency coordination.
 The audit endpoint (`GET /api/v1/audit/transactions/{id}`) is
 protected by authentication and authorization — customers may
 only access their own audit trail.
+
+**Step 46 (production model lifecycle & version governance) is
+complete.** The ML service now activates models through an
+integrity-verified registry:
+
+- A model manifest (`ml/models/model_manifest.json`) records the
+  active version, artifact filename, SHA-256 checksum, feature
+  schema version, and creation timestamp.
+- Startup activation enforces: manifest presence → artifact
+  checksum verification → bundle load → interface validation
+  (`predict_proba`) → feature compatibility validation → ACTIVE.
+- Any failure leaves the service in `model_unavailable` state;
+  no unverified model is ever loaded.
+- The authoritative model identity (name, version, checksum,
+  schema) is exposed consistently via `/health`, `/ready`,
+  `/metrics`, prediction responses, and audit records.
+- Configuration-based rollback re-validates the target before
+  switching; a failed candidate never destroys a working model.
+- Model artifacts remain file/manifest-based (no new DB tables)
+  and must originate from a trusted training pipeline (joblib
+  uses pickle, which can execute code on load).

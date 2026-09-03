@@ -87,10 +87,20 @@ class FraudPredictor:
     Args:
         bundle_path: Path to the saved model bundle.
                      ``None`` uses the default location.
+                     Ignored if ``bundle`` is provided.
+        bundle: Pre-loaded and verified ModelBundle.
+                If provided, ``bundle_path`` is ignored.
     """
 
-    def __init__(self, bundle_path: str | Path | None = None) -> None:
-        self._bundle: ModelBundle = load_bundle(bundle_path)
+    def __init__(
+        self,
+        bundle_path: str | Path | None = None,
+        bundle: ModelBundle | None = None,
+    ) -> None:
+        if bundle is not None:
+            self._bundle = bundle
+        else:
+            self._bundle = load_bundle(bundle_path)
         self._feature_set: set[str] = set(self._bundle.feature_names)
         # Lazily initialised SHAP explainer (constructed on first use).
         # Protected by a lock so concurrent predict(explain=True) calls
@@ -115,6 +125,11 @@ class FraudPredictor:
     @property
     def is_loaded(self) -> bool:
         return self._bundle is not None
+
+    @property
+    def n_features(self) -> int:
+        """Number of features expected by the model."""
+        return self._bundle.n_features
 
     # ── Prediction ────────────────────────────────────────────────────
 

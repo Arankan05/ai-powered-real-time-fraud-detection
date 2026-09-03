@@ -14,12 +14,16 @@ The model is loaded **once** at application startup via a lifespan
 handler and reused for all requests — no retraining or refitting
 per request.
 
+Step 46: Model governance adds integrity verification, manifest-based
+loading, and an authoritative model registry.
+
 Run locally::
 
     uvicorn ml.api.app:app --host 0.0.0.0 --port 8001
 
 Environment:
   ``ML_MODEL_PATH``        — Override the default artifact path.
+  ``ML_MODEL_DIR``         — Override the default model directory.
   ``ML_HISTORY_DB_PATH``   — SQLite history store path.
 """
 
@@ -44,6 +48,7 @@ from ml.features.history import (
 import ml.features.history as _history_module
 from ml.predict.bundle import ModelLoadError, model_exists
 from ml.predict.predictor import FraudPredictor, PredictionResult
+from ml.predict.registry import ModelRegistry, ActivationError
 from ml.risk.aggregator import aggregate_risk
 from ml.rules.engine import evaluate_rules
 from ml.monitoring.metrics import metrics as _metrics
@@ -53,18 +58,29 @@ logger = logging.getLogger(__name__)
 # ── Lifespan: load model once at startup ──────────────────────────────
 
 _predictor: FraudPredictor | None = None
+_registry: ModelRegistry | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model and initialise persistent history store; release on shutdown."""
-    global _predictor
+    """Load model via registry with integrity verification; initialise history store."""
+    global _predictor, _registry
 
-    # ── Model ─────────────────────────────────────────────────────
-    model_path = os.environ.get("ML_MODEL_PATH")
+    # ── Model (Step 46: registry-based activation) ─────────────
+    model_dir = os.environ.get("ML_MODEL_DIR")
+    _registry = ModelRegistry(model_directory=model_dir)
+
     try:
-        _predictor = FraudPredictor(bundle_path=model_path)
-        logger.info("Model loaded: version=%s", _predictor.model_version)
+        identity = _registry.activate_from_manifest()
+        _predictor = FraudPredictor(bundle=_registry.bundle)
+        logger.info(
+            "Model activated via registry: version=%s checksum=%s",
+            identity.model_version,
+            identity.checksum_short,
+        )
+    except ActivationError as exc:
+        logger.warning("Model activation failed (%s); service starts without model", exc)
+        _predictor = None
     except FileNotFoundError as exc:
         logger.warning("Model not available: %s", exc)
         _predictor = None
@@ -72,8 +88,10 @@ async def lifespan(app: FastAPI):
         logger.warning("Model load failed: %s", exc)
         _predictor = None
     except Exception as exc:
-        # Catch-all: any unexpected loading failure should not crash startup.
-        logger.warning("Unexpected model load failure (%s); service starts without model", type(exc).__name__)
+        logger.warning(
+            "Unexpected model load failure (%s); service starts without model",
+            type(exc).__name__,
+        )
         _predictor = None
 
     # ── History store ─────────────────────────────────────────────
@@ -91,6 +109,7 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ──────────────────────────────────────────────────
     _predictor = None
+    _registry = None
     if sqlite_store is not None:
         try:
             sqlite_store.close()
@@ -340,6 +359,9 @@ class HealthResponse(BaseModel):
     history_store: str | None = Field(
         None, description="History store type ('sqlite' or 'in_memory')"
     )
+    model_identity: dict[str, Any] | None = Field(
+        None, description="Active model identity (Step 46)"
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────
@@ -578,6 +600,7 @@ def health() -> HealthResponse:
     """
     store = _history_module.history_store
     store_type = _store_type_label(store)
+    identity_dict = _registry.identity.to_dict() if _registry and _registry.identity else None
     if _predictor is None:
         return HealthResponse(status="model_unavailable", history_store=store_type)
     return HealthResponse(
@@ -585,6 +608,7 @@ def health() -> HealthResponse:
         model_version=_predictor.model_version,
         features=len(_predictor.feature_names),
         history_store=store_type,
+        model_identity=identity_dict,
     )
 
 
@@ -601,6 +625,9 @@ class ReadinessResponse(BaseModel):
     history_store: str | None = Field(
         None, description="History store type ('sqlite' or 'in_memory')"
     )
+    model_identity: dict[str, Any] | None = Field(
+        None, description="Active model identity (Step 46)"
+    )
 
 
 @app.get("/live", response_model=LivenessResponse)
@@ -614,6 +641,7 @@ def readiness() -> ReadinessResponse:
     """Readiness probe — reports whether the model is loaded and service can predict."""
     store = _history_module.history_store
     store_type = _store_type_label(store)
+    identity_dict = _registry.identity.to_dict() if _registry and _registry.identity else None
     if _predictor is None:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -626,6 +654,7 @@ def readiness() -> ReadinessResponse:
         model_version=_predictor.model_version,
         features=len(_predictor.feature_names),
         history_store=store_type,
+        model_identity=identity_dict,
     )
 
 
@@ -660,6 +689,9 @@ class MetricsResponse(BaseModel):
     model_version: str | None = Field(
         None, description="Currently loaded model version"
     )
+    model_identity: dict[str, Any] | None = Field(
+        None, description="Active model identity (Step 46)"
+    )
     latency: dict[str, Any] = Field(
         ..., description="Latency statistics (seconds)"
     )
@@ -685,7 +717,13 @@ def get_metrics() -> MetricsResponse:
     The ML service runs on an internal network behind the backend
     trust boundary.
     """
-    return MetricsResponse(**_metrics.snapshot())
+    snapshot = _metrics.snapshot()
+    # Add model identity from registry (Step 46)
+    if _registry and _registry.identity:
+        snapshot["model_identity"] = _registry.identity.to_dict()
+    else:
+        snapshot["model_identity"] = None
+    return MetricsResponse(**snapshot)
 
 
 # ── Global error handlers (Step 42: prevent information leakage) ─────

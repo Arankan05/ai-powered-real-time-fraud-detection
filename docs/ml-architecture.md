@@ -270,21 +270,49 @@ The top N contributing factors are returned in the API response and stored in `t
 
 | Stage | Description |
 |---|---|
-| Training | Offline batch process; outputs a serialised model artefact (.joblib). |
+| Training | Offline batch process; outputs a serialised model artefact (.joblib) plus a model manifest. |
 | Validation | Held-out test set evaluation; metrics logged to `model_metadata` table. |
-| Deployment | Model artefact stored at `ML_MODEL_PATH`. Service loads on startup. |
-| Monitoring | Track prediction distribution drift over time (future). |
+| Deployment | Model artefact + manifest stored in `ml/models/`. Service activates via integrity verification at startup (Step 46). |
+| Monitoring | Prediction distribution drift tracking plus model identity observability (Step 43/46). |
 | Retraining | Triggered manually or on a schedule when performance degrades (future). |
 
-### Model Loading
+### Model Loading (Step 46 — Model Governance)
 
-- **Artifact location:** Path specified by `ML_MODEL_PATH` environment variable (e.g., `ml/models/fraud_xgb_v1.joblib`).
-- **Version selection:** The latest model from `model_metadata` table, or the path specified by `ML_MODEL_VERSION` env var.
-- **Startup behaviour:** The ML service loads the model at startup. If the model file is missing or corrupt, the service starts in a `model_unavailable` state.
-- **Health endpoint:** The ML service exposes a `/health` endpoint that reports `{ "status": "ready", "model_version": "..." }` or `{ "status": "model_unavailable" }`.
+- **Artifact location:** `ml/models/` by default, override via the `ML_MODEL_DIR` environment variable. The registry reads `ml/models/model_manifest.json` to locate the active artifact.
+- **Activation sequence:** manifest loaded → artifact checksum (SHA-256) verified → bundle loaded → model interface validated (`predict_proba`) → feature compatibility validated (feature count + schema version) → model marked ACTIVE.
+- **Startup behaviour:** The ML service loads the model through the `ModelRegistry` at startup. If the manifest is missing, the artifact is missing/corrupt, the checksum mismatches, or interface/feature validation fails, the service starts in a `model_unavailable` state — it never silently falls back to an unverified model.
+- **Model identity:** The authoritative identity (name, version, artifact checksum, feature schema version, feature count) is exposed consistently via `/health`, `/ready`, `/metrics` (`model_identity` field), prediction responses (`model_version`), and fraud-decision audit records.
+- **Rollback:** Configuration-based. An operator supplies a previously verified `ModelManifest` to `ModelRegistry.rollback()`; the target must still pass full checksum/interface validation. Invalid targets are rejected and the current active model is untouched. Failed activation of a candidate never destroys a working model.
+- **Trust boundary:** Model artifacts use joblib serialisation (pickle-based, can execute code on load). Artifacts must originate from a trusted build/training pipeline. The checksum proves the artifact is unmodified since manifest creation — it does **not** sandbox an untrusted artifact.
+- **Client isolation:** Clients can never supply or override the model version, artifact path, or active model selection. No model-management endpoint is exposed.
+- **Health endpoint:** The ML service exposes a `/health` endpoint that reports `{ "status": "ready", "model_version": "...", "model_identity": {...} }` or `{ "status": "model_unavailable" }`.
 - **Cold start (no trained model):** The service starts and reports `model_unavailable`. All `/predict` requests return 503. The backend propagates this as 503 to clients.
 - **Model version in response:** Every prediction response includes `model_version` identifying which model was used.
-- **Model version persistence:** The backend persists `model_version` in the `transactions` table (FK → `model_metadata.model_version`) for every successfully analysed transaction. This enables per-transaction audit traceability: *"Which model produced this fraud score?"*
+- **Model version persistence:** The backend persists `model_version` in the `transactions` table for every successfully analysed transaction. This enables per-transaction audit traceability: *"Which model produced this fraud score?"*
+
+#### Manifest format (`ml/models/model_manifest.json`)
+
+```json
+{
+  "artifact_checksum": "<sha-256 hex of artifact>",
+  "artifact_filename": "fraud_xgb_tuned.joblib",
+  "created_at": "<ISO 8601 UTC>",
+  "feature_schema_version": "1.0.0",
+  "model_name": "fraud-xgb",
+  "model_version": "fraud-xgb-v1.0.0",
+  "n_features": 24,
+  "serialization_format": "joblib",
+  "status": "active",
+  "threshold": 0.5
+}
+```
+
+#### Operator workflow
+
+1. Train/save: `python -m ml.predict.save_model` (writes artifact + manifest).
+2. Verify: the service validates the manifest checksum on every startup.
+3. Rollback: point the manifest (or `ML_MODEL_DIR`) at a previously verified version; the service re-validates the target before activating it.
+4. Investigate: `/health`, `/ready`, and `/metrics` report the active identity including checksum.
 
 ## Data Policy
 
@@ -294,4 +322,4 @@ The top N contributing factors are returned in the API response and stored in `t
 
 ## Status
 
-This ML architecture is agreed upon but **not yet implemented**. Feature engineering, model training, and the behaviour/rules engines will be developed during the implementation phase.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, and model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety) are complete.

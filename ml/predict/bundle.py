@@ -18,6 +18,9 @@ Artifact files are excluded from version control by ``.gitignore``
 
 The bundle is loaded once at service startup and reused for all
 predictions — no retraining or refitting per request.
+
+Step 46: Model governance adds integrity verification and a manifest.
+See :mod:`ml.predict.integrity` and :mod:`ml.predict.registry`.
 """
 
 from __future__ import annotations
@@ -132,6 +135,19 @@ def load_bundle(path: str | Path | None = None) -> ModelBundle:
             "Model artifact not found. "
             "Run `python -m ml.predict.save_model` to generate it."
         )
+
+    # Path safety: prevent traversal outside the model directory
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(_DEFAULT_MODEL_DIR.resolve())
+    except ValueError:
+        # Allow paths explicitly outside the default directory
+        # (e.g. configured via ML_MODEL_PATH), but still block
+        # known-dangerous patterns.
+        if ".." in str(path):
+            raise ModelLoadError(
+                "Model artifact path contains directory traversal."
+            )
 
     try:
         payload = joblib.load(path)
