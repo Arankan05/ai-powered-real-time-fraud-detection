@@ -575,6 +575,95 @@ paths are printed in normal output.
 - The gate does not perform statistical significance testing; it
   applies configured policy thresholds deterministically.
 
+### Promotion History (Step 49 — Audit Trail & Traceability)
+
+**The promotion history NEVER modifies production state, the active
+manifest, the production threshold, or runtime model. It is an
+append-only, read-only audit trail.**
+
+#### History architecture
+
+- `ml/evaluation/promotion_history.py`: persistence layer for
+  promotion gate decisions. After each gate run, the decision is
+  automatically saved to a structured history directory.
+- Storage: JSON files in `PROMO_HISTORY_DIR` (default:
+  `ml/promotion_history/`). Each file is named by the gate timestamp
+  (ISO 8601 UTC, filesystem-safe).
+- Bounded: max 1000 files, each < 32 KB. When the limit is reached,
+  the oldest files are automatically removed.
+- Fail-safe: history write failures are logged but do not affect the
+  promotion gate decision. The gate still returns APPROVED/REJECTED.
+
+#### History contents
+
+Each history file contains the full `PromotionDecision` dict (from
+`PromotionDecision.to_dict()`), which includes:
+
+- Candidate and production model identities (verified governance).
+- Evaluation metadata (dataset identifier, sample counts).
+- Bounded metric summaries for both models.
+- Every configured gate with actual/required values and PASS/FAIL.
+- Overall decision and rejection reasons.
+- Reproducibility metadata (policy source, config, timestamp).
+
+History files contain **no** raw transactions, customer IDs, raw
+labels, prediction arrays, filesystem paths, or secrets.
+
+#### CLI
+
+```bash
+# List recent decisions
+python -m ml.evaluation.promotion_history
+
+# Filter by decision
+python -m ml.evaluation.promotion_history --decision APPROVED
+python -m ml.evaluation.promotion_history --decision REJECTED
+
+# Limit output
+python -m ml.evaluation.promotion_history --limit 10
+
+# Show summary statistics
+python -m ml.evaluation.promotion_history --summary
+
+# Override history directory
+python -m ml.evaluation.promotion_history --history-dir /path/to/history
+```
+
+Exit codes: 0 success, 1 error.
+
+#### Configuration
+
+- `PROMO_HISTORY_DIR`: history directory path (default:
+  `ml/promotion_history/`). Set to `none` or `off` to disable
+  history persistence.
+- `MAX_HISTORY_FILES`: max number of history files (default: 1000).
+- `MAX_HISTORY_FILE_SIZE`: max file size in bytes (default: 32768).
+
+#### Security
+
+- History is append-only — existing records are never modified.
+- Queries are read-only — they never mutate production state.
+- Write failures are fail-safe — they don't affect the gate decision.
+- No raw data, secrets, or paths appear in history files.
+- Storage is bounded to prevent unbounded growth.
+
+#### Operator workflow
+
+1. Run the promotion gate (Step 48): the decision is automatically
+   saved to history.
+2. Query history: `python -m ml.evaluation.promotion_history`.
+3. Review past decisions for audit, traceability, or governance.
+
+#### Known limitations
+
+- History files are local to the machine running the gate; there is
+  no centralised history store or replication.
+- History does not include the full evaluation report — only the
+  promotion decision summary. For full reports, use `--output` with
+  the promotion gate CLI.
+- History retention is bounded; old files are automatically removed
+  when the limit is reached.
+
 ## Data Policy
 
 - **No real banking or customer data** is used at any stage.
@@ -583,4 +672,4 @@ paths are printed in normal output.
 
 ## Status
 
-Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), and automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation) are complete.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), and promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation) are complete.

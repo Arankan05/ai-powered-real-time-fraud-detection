@@ -63,6 +63,7 @@ import pandas as pd
 
 from ml.evaluation.config import EvaluationConfig, EvaluationConfigError
 from ml.evaluation.metrics import LabelError, ProbabilityError
+from ml.evaluation.promotion_history import save_decision
 from ml.evaluation.promotion_policy import PromotionPolicy, PromotionPolicyError
 from ml.evaluation.runner import (
     DATASET_IDENTIFIER,
@@ -955,6 +956,11 @@ def main() -> None:
             json.dump(decision.to_dict(), f, indent=2, sort_keys=True)
             f.write("\n")
         print(f"\nReport written to: {out_path}")
+
+    # Save to promotion history (fail-safe — errors logged, not raised)
+    saved_path = save_decision(decision.to_dict())
+    if saved_path is not None:
+        print(f"Decision saved to history: {saved_path.name}")
 
     sys.exit(0 if decision.decision == DECISION_APPROVED else 1)
 

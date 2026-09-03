@@ -257,3 +257,23 @@ model against the current production model and answers `APPROVED` or
   Exit codes: 0 approved, 1 rejected, 2 internal error.
 - Full documentation: `docs/ml-architecture.md` (Promotion Gate, Step 48)
   and `.env.example` (`PROMO_*` section).
+
+**Step 49 (promotion history & audit trail) is complete.**
+An append-only, production-safe audit trail persists every promotion
+gate decision for traceability and governance:
+
+- After each promotion gate run, the decision is automatically saved
+  to a structured history directory (`PROMO_HISTORY_DIR`, default
+  `ml/promotion_history/`). Each decision is stored as a bounded JSON
+  file named by timestamp.
+- Storage is bounded: max 1000 files, each < 32 KB. Oldest files are
+  automatically removed when the limit is reached.
+- History write failures are logged but do not affect the promotion
+  gate decision (fail-safe).
+- CLI: `python -m ml.evaluation.promotion_history [--history-dir DIR]`
+  lists decisions; `--decision APPROVED|REJECTED` filters by outcome;
+  `--limit N` caps output; `--summary` shows statistics.
+- History is read-only for queries — it never modifies production
+  state, the active manifest, or the production threshold.
+- Full documentation: `docs/ml-architecture.md` (Promotion History,
+  Step 49) and `.env.example` (`PROMO_HISTORY_DIR` section).

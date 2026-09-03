@@ -31,6 +31,16 @@ from ml.evaluation.promotion_policy import (
     PromotionPolicy,
     PromotionPolicyError,
 )
+from ml.evaluation.promotion_history import (
+    DEFAULT_HISTORY_DIR,
+    MAX_HISTORY_FILES,
+    MAX_HISTORY_FILE_SIZE,
+    PromotionHistoryError,
+    list_decisions,
+    load_decision,
+    save_decision,
+    summarize_history,
+)
 from ml.evaluation.thresholds import (
     Recommendation,
     ThresholdPoint,
@@ -63,6 +73,15 @@ __all__ = [
     # promotion policy (Step 48)
     "PromotionPolicy",
     "PromotionPolicyError",
+    # promotion history (Step 49)
+    "DEFAULT_HISTORY_DIR",
+    "MAX_HISTORY_FILES",
+    "MAX_HISTORY_FILE_SIZE",
+    "PromotionHistoryError",
+    "list_decisions",
+    "load_decision",
+    "save_decision",
+    "summarize_history",
     # thresholds
     "Recommendation",
     "ThresholdPoint",

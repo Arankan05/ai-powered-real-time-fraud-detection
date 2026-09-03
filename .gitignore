@@ -71,6 +71,7 @@ ml/models/*.h5
 ml/datasets/raw/
 ml/datasets/processed/
 ml/notebooks/.ipynb_checkpoints/
+ml/promotion_history/
 *.ipynb_checkpoints/
 
 # SQLite databases
