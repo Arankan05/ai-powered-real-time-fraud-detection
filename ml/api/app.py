@@ -624,4 +624,3 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Internal server error."},
     )
-

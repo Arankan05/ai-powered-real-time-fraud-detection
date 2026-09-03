@@ -24,7 +24,7 @@ development with::
 
 Run locally::
 
-    uvicorn backend.app:app --host 0.0.0.0 --port 8000
+    uvicorn backend._main:app --host 0.0.0.0 --port 8000
 """
 
 from __future__ import annotations
