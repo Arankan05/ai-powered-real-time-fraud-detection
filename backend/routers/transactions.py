@@ -18,6 +18,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 
+from backend.db.audit_repository import (
+    ALERT_CREATED,
+    DECISION_MADE,
+    ML_FAILURE,
+    OUTCOME_RECORDED,
+    build_explanation_summary,
+    build_rule_signal_summary,
+    normalize_failure_category,
+)
 from backend.schemas import (
     AlertSummary,
     MLExplanation,
@@ -64,6 +73,9 @@ _alert_repo = None
 # Step 44: idempotency store — set at app startup
 _idempotency_store = None
 
+# Step 45: audit repository — set at app startup
+_audit_repo = None
+
 
 def set_ml_client(client: MLServiceClient) -> None:
     """Set the ML service client (called during app startup)."""
@@ -81,6 +93,12 @@ def set_idempotency_store(store: Any) -> None:
     """Set the idempotency store (called during app startup)."""
     global _idempotency_store
     _idempotency_store = store
+
+
+def set_audit_repository(repo: Any) -> None:
+    """Set the audit repository (called during app startup)."""
+    global _audit_repo
+    _audit_repo = repo
 
 
 def get_ml_client() -> MLServiceClient:
@@ -213,6 +231,7 @@ async def create_transaction(
             key=key,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="ML fraud detection service is unavailable.",
+            failure_category="service_unavailable",
         )
     except MLServiceTimeoutError as exc:
         logger.error("ML service timeout: %s", exc)
@@ -223,6 +242,7 @@ async def create_transaction(
             key=key,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="ML fraud detection service timed out.",
+            failure_category="service_timeout",
         )
     except MLServiceResponseError as exc:
         logger.error("ML service error: %s", exc)
@@ -234,6 +254,7 @@ async def create_transaction(
                 key=key,
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="ML model not available.",
+                failure_category="service_unavailable",
             )
         return _handle_ml_failure(
             transaction_id=transaction_id,
@@ -242,6 +263,7 @@ async def create_transaction(
             key=key,
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="ML fraud detection returned an error.",
+            failure_category="service_error",
         )
 
     # Build response — merge transaction data with fraud results.
@@ -259,6 +281,14 @@ async def create_transaction(
             ml_top_factors=list(ml_result.explanation),
         )
 
+    # Step 45: audit successful ML decision
+    _audit_decision(
+        transaction_id=transaction_id,
+        customer_id=customer_id,
+        ml_result=ml_result,
+        explanation=explanation,
+    )
+
     # Create alert if decision is HOLD (high-risk transaction)
     alert_summary = _maybe_create_alert(
         ml_result=ml_result,
@@ -267,6 +297,15 @@ async def create_transaction(
         explanation=explanation,
         customer_id=customer_id,
     )
+
+    # Step 45: audit alert creation
+    if alert_summary is not None:
+        _audit_alert_created(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            alert_id=alert_summary.id,
+            ml_result=ml_result,
+        )
 
     txn_response = TransactionResponse(
         transaction_id=transaction_id,
@@ -323,6 +362,7 @@ def _handle_ml_failure(
     key: str | None,
     status_code: int,
     detail: str,
+    failure_category: str = "unknown",
 ) -> None:
     """Mark idempotency record as failed, then raise HTTPException.
 
@@ -330,6 +370,12 @@ def _handle_ml_failure(
     The idempotency record is marked "failed" so future retries with
     the same key are allowed.
     """
+    # Step 45: audit ML failure
+    _audit_ml_failure(
+        transaction_id=transaction_id,
+        customer_id=customer_id,
+        failure_category=failure_category,
+    )
     if key is not None and _idempotency_store is not None:
         _idempotency_store.mark_failed(customer_id, key)
     raise HTTPException(status_code=status_code, detail=detail)
@@ -479,9 +525,124 @@ async def update_transaction_outcome(
             detail="ML outcome update returned an error.",
         )
 
+    # Step 45: audit outcome feedback
+    _audit_outcome(
+        customer_id=request.customer_id,
+        actor_id=current_user["id"],
+        actor_role=current_user.get("role"),
+        is_fraud=request.is_fraud,
+    )
+
     return OutcomeResponse(
         updated=result.get("updated", True),
         customer_id=result.get("customer_id", request.customer_id),
         timestamp=result.get("timestamp", request.timestamp),
         is_fraud=result.get("is_fraud", request.is_fraud),
     )
+
+
+# ── Step 45: Audit helpers ────────────────────────────────────────────
+
+
+def _audit_decision(
+    *,
+    transaction_id: str,
+    customer_id: str | None,
+    ml_result: MLPredictionResponse,
+    explanation: MLExplanation | None,
+) -> None:
+    """Audit a successful ML decision (best-effort, never blocks)."""
+    if _audit_repo is None or customer_id is None:
+        return
+    try:
+        _audit_repo.create(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            event_type=DECISION_MADE,
+            decision=ml_result.decision,
+            risk_score=ml_result.risk_score,
+            risk_level=ml_result.risk_level,
+            fraud_probability=ml_result.fraud_probability,
+            model_version=ml_result.model_version,
+            explanation_summary=build_explanation_summary(explanation),
+            rule_signal_summary=build_rule_signal_summary(
+                ml_result.risk_factors, explanation,
+            ),
+        )
+    except Exception:
+        logger.warning("Failed to audit decision event", exc_info=True)
+
+
+def _audit_ml_failure(
+    *,
+    transaction_id: str,
+    customer_id: str | None,
+    failure_category: str,
+) -> None:
+    """Audit an ML failure (best-effort, never blocks)."""
+    if _audit_repo is None or customer_id is None:
+        return
+    try:
+        _audit_repo.create(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            event_type=ML_FAILURE,
+            failure_category=normalize_failure_category(failure_category),
+        )
+    except Exception:
+        logger.warning("Failed to audit ML failure event", exc_info=True)
+
+
+def _audit_alert_created(
+    *,
+    transaction_id: str,
+    customer_id: str | None,
+    alert_id: str,
+    ml_result: MLPredictionResponse,
+) -> None:
+    """Audit alert creation (best-effort, never blocks)."""
+    if _audit_repo is None or customer_id is None:
+        return
+    try:
+        _audit_repo.create(
+            transaction_id=transaction_id,
+            customer_id=customer_id,
+            event_type=ALERT_CREATED,
+            decision=ml_result.decision,
+            risk_score=ml_result.risk_score,
+            risk_level=ml_result.risk_level,
+            alert_id=alert_id,
+        )
+    except Exception:
+        logger.warning("Failed to audit alert creation event", exc_info=True)
+
+
+def _audit_outcome(
+    *,
+    customer_id: str,
+    actor_id: str,
+    actor_role: str | None,
+    is_fraud: int,
+) -> None:
+    """Audit outcome feedback (best-effort, never blocks).
+
+    Outcome feedback targets the ML service's history store, not a
+    specific transaction_id.  We use customer_id as the transaction_id
+    reference to maintain the audit chain.
+    """
+    if _audit_repo is None:
+        return
+    try:
+        _audit_repo.create(
+            # Outcome feedback does not target a specific transaction;
+            # use a deterministic placeholder UUID so the audit record
+            # is still queryable by customer context.
+            transaction_id="00000000-0000-4000-8000-000000000000",
+            customer_id=customer_id,
+            event_type=OUTCOME_RECORDED,
+            actor_id=actor_id,
+            actor_role=actor_role,
+            metadata={"is_fraud": is_fraud},
+        )
+    except Exception:
+        logger.warning("Failed to audit outcome event", exc_info=True)

@@ -192,6 +192,7 @@ class InMemoryAlertStore:
             # Allow same-status updates (for notes-only changes)
             if new_status != alert["status"] and not is_valid_transition(alert["status"], new_status):
                 return None  # caller should check return
+            previous_status = alert["status"]
             alert["status"] = new_status
             if notes is not None:
                 alert["notes"] = notes
@@ -200,7 +201,9 @@ class InMemoryAlertStore:
             if new_status in TERMINAL_STATUSES:
                 alert["resolved_at"] = datetime.now(timezone.utc).isoformat()
             alert["updated_at"] = datetime.now(timezone.utc).isoformat()
-            return dict(alert)
+            result = dict(alert)
+            result["_previous_status"] = previous_status
+            return result
 
 
 # ── SQLite implementation ─────────────────────────────────────────────
@@ -395,6 +398,7 @@ class SQLiteAlertRepository:
             if new_status != current_status and not is_valid_transition(current_status, new_status):
                 return None
 
+            previous_status = current_status
             now = datetime.now(timezone.utc).isoformat()
             resolved_at = now if new_status in TERMINAL_STATUSES else row["resolved_at"]
             updated_analyst = row["analyst_id"]
@@ -418,7 +422,10 @@ class SQLiteAlertRepository:
             )
             updated_row = cur.fetchone()
 
-        return self._row_to_dict(updated_row) if updated_row else None
+        result = self._row_to_dict(updated_row) if updated_row else None
+        if result is not None:
+            result["_previous_status"] = previous_status
+        return result
 
     # ── Internal helpers ──────────────────────────────────────────────
 
@@ -635,6 +642,7 @@ class PostgresAlertRepository:
                 if new_status != current_status and not is_valid_transition(current_status, new_status):
                     return None
 
+                previous_status = current_status
                 now = datetime.now(timezone.utc).isoformat()
                 resolved_at = now if new_status in TERMINAL_STATUSES else row["resolved_at"]
                 updated_analyst = row["analyst_id"]
@@ -653,7 +661,10 @@ class PostgresAlertRepository:
                 cur.execute("SELECT * FROM alerts WHERE id = %s", (aid,))
                 updated_row = cur.fetchone()
 
-        return self._row_to_dict(updated_row) if updated_row else None
+        result = self._row_to_dict(updated_row) if updated_row else None
+        if result is not None:
+            result["_previous_status"] = previous_status
+        return result
 
     # ── Internal helpers ──────────────────────────────────────────────
 

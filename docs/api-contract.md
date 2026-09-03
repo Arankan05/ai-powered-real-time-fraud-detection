@@ -917,3 +917,77 @@ The response and persisted alert always represent the SAME decision:
   SQLite persistence backend; PostgreSQL mode uses database-backed
   idempotency with race-condition protection via UNIQUE constraints
 * Idempotency records have no automatic TTL (manual cleanup required)
+
+---
+
+## Audit Trail Endpoints (Step 45)
+
+### GET /api/v1/audit/transactions/{transaction_id}
+
+Retrieve the complete fraud decision audit trail for a transaction.
+
+**Authentication:** Required (Bearer token).
+
+**Authorization:**
+- `fraud_analyst` / `admin`: full access to any transaction's audit trail.
+- `customer`: may only access their own audit trail (customer_id derived from JWT).
+
+**Response** `200 OK`:
+
+```json
+{
+  "transaction_id": "uuid",
+  "events": [
+    {
+      "audit_id": "uuid",
+      "transaction_id": "uuid",
+      "customer_id": "uuid",
+      "event_type": "DECISION_MADE",
+      "decision": "HOLD",
+      "risk_score": 75,
+      "risk_level": "HIGH",
+      "fraud_probability": 0.85,
+      "model_version": "xgb-v2.1.0",
+      "explanation_summary": {...},
+      "rule_signal_summary": {...},
+      "failure_category": null,
+      "actor_id": null,
+      "actor_role": null,
+      "previous_state": null,
+      "new_state": null,
+      "alert_id": null,
+      "created_at": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Event types:**
+| `event_type` | Description |
+|---|---|
+| `DECISION_MADE` | ML prediction completed successfully |
+| `ML_FAILURE` | ML service was unavailable or errored |
+| `ALERT_CREATED` | Fraud alert created for HOLD decision |
+| `ALERT_STATE_CHANGED` | Analyst changed alert status |
+| `OUTCOME_RECORDED` | Fraud outcome feedback recorded |
+
+**Error responses:**
+| Status | Condition |
+|---|---|
+| `401` | Missing or invalid authentication |
+| `403` | Customer accessing another customer's audit trail |
+| `404` | No audit events found (analyst/admin only) |
+
+**Security properties:**
+- Customer isolation enforced from JWT, not request body
+- No secrets, passwords, JWTs, or raw transaction payloads in response
+- Bounded explanation summaries (max 5 factors, max 200 char strings)
+- Append-only: no PUT/PATCH/DELETE endpoints exist
+- Idempotent replays do not duplicate DECISION_MADE audit events
+
+### Known Limitations (Audit)
+
+* Audit events are append-only; no mechanism to delete or modify old events
+* In-memory audit store is used for SQLite mode (volatile)
+* Outcome feedback uses a deterministic placeholder transaction_id
+* No automatic TTL or retention policy on audit records

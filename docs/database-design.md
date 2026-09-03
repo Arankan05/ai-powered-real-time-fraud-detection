@@ -375,3 +375,53 @@ Indexes: `uq_idempotency_customer_key` (unique composite),
 `ix_idempotency_keys_created_at`. Schema is idempotently created
 alongside `users` and `alerts` tables. The `users` and `alerts`
 tables remain unchanged.
+
+## Step 45 — Fraud Decision Audit Trail
+
+New `fraud_decision_audit` table for append-only audit logging of
+fraud decision events:
+
+```
+fraud_decision_audit
+├─ audit_id             UUID PK
+├─ transaction_id       UUID NOT NULL
+├─ customer_id          UUID NOT NULL
+├─ event_type           VARCHAR(30) NOT NULL
+│                       CHECK (event_type IN ('DECISION_MADE',
+│                              'ML_FAILURE', 'ALERT_CREATED',
+│                              'ALERT_STATE_CHANGED',
+│                              'OUTCOME_RECORDED'))
+├─ decision             VARCHAR(20)  -- APPROVE/VERIFY/HOLD
+├─ risk_score           INTEGER      -- 0–100
+├─ risk_level           VARCHAR(10)  -- LOW/MEDIUM/HIGH
+├─ fraud_probability    DOUBLE PRECISION
+├─ model_version        VARCHAR(100)
+├─ explanation_summary  JSONB        -- bounded SHAP summary
+├─ rule_signal_summary   JSONB        -- bounded rule signals
+├─ failure_category     VARCHAR(50)  -- normalised failure type
+├─ actor_id             UUID         -- authenticated actor
+├─ actor_role           VARCHAR(20)
+├─ previous_state       VARCHAR(20)  -- alert state before change
+├─ new_state            VARCHAR(20)  -- alert state after change
+├─ alert_id             UUID         -- related alert
+├─ metadata             JSONB        -- minimal extra data
+└─ created_at           TIMESTAMPTZ NOT NULL
+```
+
+Indexes:
+- `ix_audit_transaction_id` — lookup by transaction
+- `ix_audit_customer_id` — lookup by customer
+- `ix_audit_created_at` — chronological ordering
+- `ix_audit_event_type` — filter by event type
+- `uq_audit_decision_per_txn` — UNIQUE partial index
+  `(transaction_id, event_type) WHERE event_type = 'DECISION_MADE'`
+  to prevent duplicate decision audits from idempotent replays
+
+**Append-only design:** The repository exposes only `create`,
+`list_by_transaction`, and `count_by_transaction_and_event`. There
+are no UPDATE or DELETE paths. The partial unique index on
+`DECISION_MADE` events is the database-level idempotency guard.
+
+**Sensitive data exclusions:** The audit table never stores card
+numbers, CVVs, passwords, JWTs, API keys, raw transaction payloads,
+customer profiles, stack traces, or raw exception messages.

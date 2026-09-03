@@ -170,3 +170,19 @@ and decision consistency between response and persisted alerts.
 Step 43 (ML monitoring and observability), Step 42 (production
 hardening), Step 41 (customer identity isolation), Step 40
 (PostgreSQL migration), and all earlier steps are complete.
+
+**Step 45 (fraud decision audit trail) is complete.** An append-only
+audit trail records all important fraud decision events:
+
+- `DECISION_MADE` — ML prediction completed successfully
+- `ML_FAILURE` — ML service unavailable or errored
+- `ALERT_CREATED` — fraud alert created for HOLD decision
+- `ALERT_STATE_CHANGED` — analyst changed alert status
+- `OUTCOME_RECORDED` — fraud outcome feedback recorded
+
+The audit trail is stored in the `fraud_decision_audit` table
+(PostgreSQL) with customer isolation, role-based access control,
+bounded explanation summaries, and idempotency coordination.
+The audit endpoint (`GET /api/v1/audit/transactions/{id}`) is
+protected by authentication and authorization — customers may
+only access their own audit trail.

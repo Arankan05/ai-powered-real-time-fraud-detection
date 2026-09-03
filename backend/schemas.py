@@ -324,3 +324,36 @@ class MeResponse(BaseModel):
     customer_id: str | None = None
     is_active: bool
     created_at: str
+
+
+# ── Audit trail (Step 45) ────────────────────────────────────────────
+
+
+class AuditEventResponse(BaseModel):
+    """Single audit event in a transaction's audit trail."""
+
+    audit_id: str
+    transaction_id: str
+    customer_id: str
+    event_type: str
+    decision: str | None = None
+    risk_score: int | None = None
+    risk_level: str | None = None
+    fraud_probability: float | None = None
+    model_version: str | None = None
+    explanation_summary: dict[str, Any] | None = None
+    rule_signal_summary: dict[str, Any] | None = None
+    failure_category: str | None = None
+    actor_id: str | None = None
+    actor_role: str | None = None
+    previous_state: str | None = None
+    new_state: str | None = None
+    alert_id: str | None = None
+    created_at: str
+
+
+class AuditTrailResponse(BaseModel):
+    """Complete audit trail for a transaction."""
+
+    transaction_id: str
+    events: list[AuditEventResponse]
