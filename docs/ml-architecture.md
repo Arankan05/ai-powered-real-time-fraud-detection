@@ -455,6 +455,126 @@ never modified by an evaluation.
 - Recommendations are point-in-time observations on the holdout split
   without confidence intervals or drift-aware re-evaluation scheduling.
 
+### Promotion Gate (Step 48 — Automated Model Validation & Promotion Gate)
+
+**The promotion gate NEVER activates a model automatically, NEVER
+modifies the production manifest, and NEVER changes the production
+decision threshold.** Promotion remains an explicit operator action
+through the Step 46 governance workflow.
+
+#### Gate architecture
+
+- `ml/evaluation/promotion_policy.py`: configurable promotion policy
+  (`PROMO_*` environment variables) with 6 absolute minimum
+  requirements and 6 relative regression limits vs production.
+- `ml/evaluation/promotion_gate.py`: the gate itself — validates the
+  candidate through the Step 46 governance sequence (scratch registry),
+  evaluates both models on the same held-out dataset through the Step 47
+  framework, applies every configured gate, and answers `APPROVED` or
+  `REJECTED`.
+- The gate reuses the Step 46 `ModelRegistry` and Step 47
+  `build_report` — no code duplication of integrity verification or
+  evaluation logic.
+- Fail-closed: any validation gap (missing artifact, invalid checksum,
+  malformed manifest, failed evaluation, unavailable metrics, invalid
+  policy) yields `REJECTED` — never `APPROVED` with incomplete
+  validation.
+
+#### Policy configuration
+
+Absolute minimum requirements (fractions in [0, 1]):
+
+- `PROMO_MIN_PR_AUC` (default 0.10), `PROMO_MIN_ROC_AUC` (0.75),
+  `PROMO_MIN_RECALL` (0.70), `PROMO_MIN_PRECISION` (0.05),
+  `PROMO_MIN_F1` (0.10), `PROMO_MAX_BRIER` (0.25).
+
+Relative regression limits vs production (fractions in [0, 1]; 0.10
+means the candidate may degrade at most 10% relative to production):
+
+- `PROMO_MAX_PR_AUC_DEGRADATION` (0.05),
+  `PROMO_MAX_ROC_AUC_DEGRADATION` (0.02),
+  `PROMO_MAX_RECALL_DEGRADATION` (0.10),
+  `PROMO_MAX_PRECISION_DEGRADATION` (0.10),
+  `PROMO_MAX_F1_DEGRADATION` (0.10),
+  `PROMO_MAX_BRIER_INCREASE` (0.10).
+
+Unset/empty variables fall back to defaults; explicit `none` or `off`
+disables that gate; out-of-range values fail closed.
+
+#### Gate semantics
+
+- Gates are inclusive at the boundary: a candidate exactly at a
+  required minimum, degradation limit, or Brier ceiling passes (tolerance
+  1e-9 for float safety).
+- Relative floor = production × (1 − degradation limit); relative
+  Brier ceiling = production × (1 + increase limit).
+- Unavailable metrics fail closed (the gate never says "approved" when
+  validation is incomplete).
+
+#### Result structure
+
+The gate returns a structured `PromotionDecision` containing:
+
+- Candidate and production model identities (from verified governance).
+- Evaluation metadata (dataset identifier, sample counts, thresholds
+  observed).
+- Bounded metric summaries for both models (precision, recall, F1,
+  ROC-AUC, PR-AUC, Brier score — aggregate only, no raw data).
+- Every configured gate with actual value, required value, PASS/FAIL
+  status, and human-readable detail.
+- Overall decision (`APPROVED` or `REJECTED`) and rejection reasons.
+- Promotion instructions (only when approved) for the Step 46 workflow.
+- Reproducibility metadata (policy source, evaluation config, dataset
+  identifier, report schema version, timestamp).
+
+The report contains **no** raw transactions, customer IDs, raw labels,
+prediction arrays, filesystem paths, or secrets.
+
+#### CLI
+
+```bash
+python -m ml.evaluation.promotion_gate --candidate-model-dir <dir> [--output PATH]
+```
+
+Exit codes: 0 approved, 1 rejected (including fail-closed validation
+failures), 2 unexpected internal error. No stack traces or internal
+paths are printed in normal output.
+
+#### Security
+
+- The candidate is validated through the full Step 46 governance
+  sequence (manifest → SHA-256 checksum → bundle load → interface →
+  feature-schema/count compatibility) using a scratch registry — the
+  candidate is never activated as, or swapped into, production.
+- The production identity is always verified from the manifest — never
+  claimed by the caller.
+- No arbitrary path traversal, no unsafe candidate metadata trust, no
+  pickle loading outside the existing trusted model-artifact boundary,
+  no arbitrary code execution introduced by the gate.
+- Reports are bounded (JSON-safe, < 32 KB), contain no secrets, and
+  are safe to persist or share.
+- The gate never writes to the production model directory, manifest,
+  or runtime state.
+
+#### Operator workflow
+
+1. Place the verified candidate artifact and `model_manifest.json` in
+   a trusted directory (produced by the trusted training pipeline).
+2. Run: `python -m ml.evaluation.promotion_gate --candidate-model-dir <dir> --output report.json`.
+3. Review the printed summary and the JSON report.
+4. If `APPROVED` and promotion is warranted, follow the Step 46
+   governance workflow (explicit operator action) to activate the
+   candidate — the gate does not perform this step.
+
+#### Known limitations
+
+- The gate evaluates on the held-out test split only; it does not
+  perform cross-validation or drift-aware re-evaluation scheduling.
+- Promotion decisions are point-in-time observations; they do not
+  account for future data distribution changes.
+- The gate does not perform statistical significance testing; it
+  applies configured policy thresholds deterministically.
+
 ## Data Policy
 
 - **No real banking or customer data** is used at any stage.
@@ -463,4 +583,4 @@ never modified by an evaluation.
 
 ## Status
 
-Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), and offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only) are complete.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), and automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation) are complete.

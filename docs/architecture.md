@@ -229,3 +229,31 @@ through `python -m ml.evaluation.runner`:
   `ml/tests/e2e_step47_evaluation.py`).
 - Full documentation: `docs/ml-architecture.md` (Offline Evaluation,
   Step 47) and `.env.example` (`EVAL_*` section).
+
+**Step 48 (automated model validation & promotion gate) is complete.**
+An offline, production-safe promotion gate compares a candidate fraud
+model against the current production model and answers `APPROVED` or
+`REJECTED`:
+
+- The candidate is validated through the full Step 46 governance
+  sequence (manifest → SHA-256 checksum → bundle load → interface →
+  feature-schema/count compatibility) using a scratch registry — the
+  candidate is never activated as, or swapped into, production.
+- Both models are evaluated on the same held-out dataset through the
+  Step 47 framework (`build_report`); each at its own bundled
+  production threshold (observed — never modified).
+- Configurable promotion policy (`PROMO_*` variables): absolute
+  minimum requirements (PR-AUC, ROC-AUC, recall, precision, F1, Brier)
+  and relative regression limits vs production (max degradation
+  fractions, max Brier increase).
+- Fail-closed: any validation gap (missing artifact, invalid checksum,
+  malformed manifest, failed evaluation, unavailable metrics, invalid
+  policy) yields `REJECTED` — never `APPROVED` with incomplete
+  validation.
+- The gate never modifies the active production manifest, artifact,
+  threshold, or runtime model. Promotion remains an explicit operator
+  action through the Step 46 governance workflow.
+- CLI: `python -m ml.evaluation.promotion_gate --candidate-model-dir <dir> [--output PATH]`.
+  Exit codes: 0 approved, 1 rejected, 2 internal error.
+- Full documentation: `docs/ml-architecture.md` (Promotion Gate, Step 48)
+  and `.env.example` (`PROMO_*` section).

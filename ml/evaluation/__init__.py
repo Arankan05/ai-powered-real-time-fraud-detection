@@ -27,6 +27,10 @@ from ml.evaluation.metrics import (
     validate_labels,
     validate_probabilities,
 )
+from ml.evaluation.promotion_policy import (
+    PromotionPolicy,
+    PromotionPolicyError,
+)
 from ml.evaluation.thresholds import (
     Recommendation,
     ThresholdPoint,
@@ -56,6 +60,9 @@ __all__ = [
     "reliability_bins",
     "validate_labels",
     "validate_probabilities",
+    # promotion policy (Step 48)
+    "PromotionPolicy",
+    "PromotionPolicyError",
     # thresholds
     "Recommendation",
     "ThresholdPoint",
