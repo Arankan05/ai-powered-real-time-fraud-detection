@@ -207,3 +207,25 @@ integrity-verified registry:
 - Model artifacts remain file/manifest-based (no new DB tables)
   and must originate from a trusted training pipeline (joblib
   uses pickle, which can execute code on load).
+
+**Step 47 (fraud model evaluation, calibration & threshold governance)
+is complete.** Offline evaluation of the verified model is available
+through `python -m ml.evaluation.runner`:
+
+- Classification metrics (confusion matrix, precision, recall, F1,
+  FPR/FNR, prevalence), ranking metrics (ROC-AUC, PR-AUC), and
+  calibration (Brier score, reliability bins) computed on the held-out
+  temporal test split from the approved dataset source.
+- Deterministic threshold sweep plus four recommendation strategies
+  (max F1, minimum business cost, minimum recall, minimum precision),
+  each labelled **EVALUATION / RECOMMENDATION ONLY**.
+- `EVAL_*` environment variables configure evaluation only — they can
+  never change the production threshold, risk aggregation, or the
+  active model. Applying a recommended threshold requires a new
+  artifact + manifest through the Step 46 governance pipeline.
+- No evaluation API endpoint exists; no client-controlled surface.
+  Monitoring counters, audit records, `/predict`, `/health`, and
+  `/ready` are unchanged by evaluation (verified end-to-end in
+  `ml/tests/e2e_step47_evaluation.py`).
+- Full documentation: `docs/ml-architecture.md` (Offline Evaluation,
+  Step 47) and `.env.example` (`EVAL_*` section).

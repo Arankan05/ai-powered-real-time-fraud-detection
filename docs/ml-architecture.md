@@ -271,7 +271,7 @@ The top N contributing factors are returned in the API response and stored in `t
 | Stage | Description |
 |---|---|
 | Training | Offline batch process; outputs a serialised model artefact (.joblib) plus a model manifest. |
-| Validation | Held-out test set evaluation; metrics logged to `model_metadata` table. |
+| Validation | Held-out temporal test-split evaluation through the offline evaluation framework (Step 47); produces a structured JSON report with metrics, threshold analysis, calibration, and labelled recommendations. |
 | Deployment | Model artefact + manifest stored in `ml/models/`. Service activates via integrity verification at startup (Step 46). |
 | Monitoring | Prediction distribution drift tracking plus model identity observability (Step 43/46). |
 | Retraining | Triggered manually or on a schedule when performance degrades (future). |
@@ -314,6 +314,147 @@ The top N contributing factors are returned in the API response and stored in `t
 3. Rollback: point the manifest (or `ML_MODEL_DIR`) at a previously verified version; the service re-validates the target before activating it.
 4. Investigate: `/health`, `/ready`, and `/metrics` report the active identity including checksum.
 
+### Offline Evaluation (Step 47 — Evaluation & Threshold Governance)
+
+**Evaluation recommendations DO NOT automatically change production decisions.**
+Everything in this section is observational: the production threshold, the
+active model, risk aggregation, monitoring counters, and audit records are
+never modified by an evaluation.
+
+#### Evaluation architecture
+
+- `ml/evaluation/` package: `config.py` (`EVAL_*` configuration),
+  `metrics.py` (classification / ranking / calibration metrics),
+  `thresholds.py` (threshold sweep + recommendation strategies), and
+  `runner.py` (report assembly + offline CLI).
+- Evaluation activates the model through the same Step 46 governance
+  pipeline (`ModelRegistry.activate_from_manifest`); it never trusts a
+  caller-claimed model version and never loads unverified artifacts.
+- The evaluation dataset is the held-out temporal test split produced by the
+  existing feature-engineering + `time_based_split` pipeline (approved
+  source only — no caller-supplied dataset or artifact paths).
+- No evaluation API endpoint exists. The operator entry point is the
+  offline CLI: `python -m ml.evaluation.runner [--output report.json]`.
+
+#### Metrics definitions
+
+| Metric | Definition |
+|---|---|
+| Confusion matrix | TP / TN / FP / FN at a given threshold (`[[tn, fp], [fn, tp]]`). |
+| Precision (among flagged) | TP / (TP + FP); 0.0 when nothing is flagged (documented convention). |
+| Recall (fraud detection rate) | TP / (TP + FN); 0.0 when there is no fraud. |
+| F1 | Harmonic mean of precision and recall. |
+| FPR / FNR | FP / (FP + TN) and FN / (FN + TP); 0.0 when the denominator class is absent. |
+| Fraud prevalence | Fraud / total samples in the evaluation split. |
+| ROC-AUC / PR-AUC | Ranking quality; PR-AUC uses average precision (appropriate under imbalance). Single-class labels raise a clear `RankingError` instead of silently computing meaningless values. |
+| Brier score | Mean squared error of raw fraud probabilities. |
+| Reliability bins | Uniform reliability-diagram bins (sklearn-compatible); empty bins omitted. |
+
+#### Threshold analysis
+
+- Deterministic sweep over the configured grid (default 0.05–0.95, step
+  0.05, stop inclusive; hard-bounded to ≤ 201 points).
+- Every point records threshold, TP/TN/FP/FN, precision, recall, F1,
+  FPR, FNR, and flagged count/rate.
+- Tie-break rule: when several thresholds are equally optimal, the
+  **highest** threshold wins (fewer flagged transactions for the same
+  score).
+
+#### Cost-sensitive analysis
+
+- Optional business-cost model:
+  `total_cost = FN × EVAL_FN_COST + FP × EVAL_FP_COST`.
+- Costs are never hard-coded. When they are not configured, the report
+  honestly marks cost analysis (and the `min_cost` recommendation)
+  unavailable with an explicit reason instead of inventing defaults.
+
+#### Calibration
+
+- Brier score plus reliability-diagram bins computed on **raw** model
+  probabilities.
+- No recalibration (Platt / isotonic) is fitted, applied, or returned; a
+  calibrated model would be a separate, explicitly approved offline
+  artifact and must never silently replace the live probability.
+
+#### Imbalance considerations
+
+- Fraud prevalence on the holdout split is ~3.4%, so accuracy is not a
+  meaningful headline; PR-AUC (average precision) is the primary ranking
+  metric alongside ROC-AUC, and precision/recall/F1 are reported per
+  threshold.
+- Class imbalance is handled at training time (`scale_pos_weight`);
+  evaluation does not resample — resampling would break the
+  leakage-safe temporal split.
+
+#### Leakage protections
+
+- `isFraud` and `TransactionID` can never be model features: the scorer
+  uses only the bundle's declared feature columns; the split and the
+  live predictor enforce the same forbidden-column rules.
+- The test split is strictly after every training transaction in time;
+  historical features are computed strictly prior to each transaction.
+- Preprocessing is reused **transform-only** — never re-fitted on
+  evaluation data.
+
+#### Model version traceability
+
+- The report's model identity (name, version, artifact checksum, schema
+  version, feature count) is taken from the verified governance identity;
+  a bundle/identity mismatch aborts the evaluation.
+- The report records the observed production threshold and its source
+  ("observed — NOT modified by evaluation").
+
+#### Reproducibility
+
+- The report embeds the evaluation configuration, split strategy,
+  dataset source, tie-break rule, and dataset metadata (sample/fraud
+  counts, split timestamp, test fraction).
+- Evaluation is fully deterministic — repeated runs differ only in the
+  timestamp.
+- The dataset is not committed to version control; reproduce by placing
+  the IEEE-CIS CSVs in `ml/datasets/raw/` and running the CLI above.
+
+#### Threshold governance
+
+- Four recommendation strategies:
+  `max_f1`, `min_cost` (requires configured costs), `min_recall`
+  (maximise precision subject to recall ≥ `EVAL_MIN_RECALL`), and
+  `min_precision` (maximise recall subject to precision ≥
+  `EVAL_MIN_PRECISION`).
+- Unconfigured or unsatisfiable strategies are reported unavailable with
+  an explicit reason — never silently dropped or defaulted.
+- Every recommendation and the report itself are labelled
+  **EVALUATION / RECOMMENDATION ONLY**.
+- Applying a different threshold requires producing a new model artifact
+  + manifest through the Step 46 governance pipeline (retrain or re-save
+  with an approved threshold); evaluation never writes production state.
+
+#### Offline vs production separation
+
+- Evaluation runs in its own registry instance and performs no writes
+  except the optional operator-requested `--output` JSON file.
+- `/predict`, `/health`, `/ready`, monitoring counters, and audit
+  records are unchanged by an evaluation (verified end-to-end in
+  `ml/tests/e2e_step47_evaluation.py`).
+
+#### Operator workflow
+
+1. Configure `EVAL_*` variables (see `.env.example`).
+2. Run: `python -m ml.evaluation.runner --output report.json`.
+3. Review the printed summary and the JSON report.
+4. If a threshold change is warranted, follow the model lifecycle above
+   (retrain/re-save with the approved threshold) — evaluation never
+   modifies production configuration.
+
+#### Known limitations
+
+- The tuned model's precision on the holdout split is low (0.0808 at the
+  0.5 production threshold); evaluation surfaces this honestly rather
+  than tuning it away.
+- Calibration is assessed, not corrected; probabilities remain raw.
+- Recommendations are point-in-time observations on the holdout split
+  without confidence intervals or drift-aware re-evaluation scheduling.
+
 ## Data Policy
 
 - **No real banking or customer data** is used at any stage.
@@ -322,4 +463,4 @@ The top N contributing factors are returned in the API response and stored in `t
 
 ## Status
 
-Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, and model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety) are complete.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), and offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only) are complete.
