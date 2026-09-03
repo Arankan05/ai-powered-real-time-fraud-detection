@@ -53,6 +53,10 @@ class PostgresSettings(BaseSettings):
     user: str = ""
     password: str = ""
     ssl_mode: str = "prefer"
+    connect_timeout: int = Field(
+        default=5,
+        description="Seconds to wait for a TCP connection before giving up.",
+    )
 
     model_config = SettingsConfigDict(env_prefix="POSTGRES_", env_file=str(_ENV_FILE), extra="ignore")
 
@@ -73,13 +77,14 @@ class PostgresSettings(BaseSettings):
         ).render_as_string(hide_password=False)
 
     @property
-    def connect_args(self) -> dict[str, str]:
+    def connect_args(self) -> dict[str, str | int]:
         """Extra arguments forwarded to the database driver.
 
         Includes ``sslmode`` so remote providers (e.g. Supabase) that
-        require TLS can be reached safely.
+        require TLS can be reached safely, and ``connect_timeout`` to
+        avoid indefinite TCP hangs when the server is unreachable.
         """
-        return {"sslmode": self.ssl_mode}
+        return {"sslmode": self.ssl_mode, "connect_timeout": self.connect_timeout}
 
 
 class MLServiceSettings(BaseSettings):

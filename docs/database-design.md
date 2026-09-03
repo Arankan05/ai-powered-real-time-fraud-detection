@@ -6,6 +6,33 @@ PostgreSQL is the single source of truth. Schema is managed exclusively via Alem
 
 No real banking or customer data is ever stored. All data is synthetic or derived from legitimate public datasets.
 
+### Current persistence phase (PostgreSQL + SQLite fallback)
+
+Step 40 implemented the PostgreSQL backend for `users` and `alerts`.
+The backend defaults to `PERSISTENCE_BACKEND=postgres`; set
+`PERSISTENCE_BACKEND=sqlite` in `.env` to use the legacy SQLite path
+(`USER_DB_PATH`, `ALERT_DB_PATH` — see `.env.example`).  Both backends
+implement the same `UserRepository` / `AlertRepository` Protocol
+interfaces (`backend/db/user_repository.py`,
+`backend/db/alert_repository.py`), so routers are unchanged.
+
+PostgreSQL schema is created idempotently at startup
+(`backend/db/postgres.py :: init_schema`) — no Alembic migrations yet.
+Notable differences from the SQLite path:
+
+* `users.email` uniqueness enforced via functional index
+  `uq_users_email_ci ON users (lower(email))` (replaces SQLite
+  `COLLATE NOCASE`).
+* `alerts.risk_factors` and `alerts.explanation_json` stored as native
+  JSONB (SQLite stores JSON-encoded TEXT).
+* `alerts.transaction_id` has a UNIQUE index as a secondary dedup guard
+  (router pre-check remains primary).
+* `users.address` is stored on the user record (the `customers` table
+  does not exist yet).
+* `updated_at` is not tracked on `users`.
+* ML historical features (`ml/features/history.py`) remain on SQLite —
+  this boundary is intentional and documented in `backend/db/__init__.py`.
+
 ## Entity Relationship Diagram
 
 ```
@@ -327,4 +354,9 @@ The API exposes `explanation` (camelCase-friendly); the database column is `expl
 
 ## Status
 
-This design is agreed upon but **not yet implemented**. Tables will be created via Alembic migrations during the implementation phase.
+**Step 42 (ML service production hardening) is complete.** No database
+schema changes were required for Step 42. The `users` and `alerts`
+tables remain in PostgreSQL with idempotent schema init (Steps 40–41).
+Remaining tables (`customers`, `transactions`, `merchants`, `audit_logs`,
+`customer_devices`, `model_metadata`, `risk_rules_config`) are designed
+but not yet implemented.

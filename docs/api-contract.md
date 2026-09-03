@@ -652,3 +652,135 @@ API versioned via URL path (`/api/v1`). Breaking changes require a new version.
 ## Status
 
 This contract is agreed upon but **not yet implemented**. Changes require both frontend and backend team agreement.
+
+---
+
+## Implementation Notes — Authentication & Authorization (Step 39)
+
+> Status of the contract above relative to the running backend on
+> `feature/ml-fraud`. The contract remains the source of truth; this
+> section documents what is implemented and where behaviour is
+> clarified.
+
+### Implemented endpoints
+
+| Endpoint | Status | Auth |
+|---|---|---|
+| `POST /api/v1/auth/register` | Implemented | Public — always creates `customer` accounts |
+| `POST /api/v1/auth/login` | Implemented | Public |
+| `POST /api/v1/auth/refresh` | Implemented | Refresh token in body (see note) |
+| `GET /api/v1/auth/me` | Implemented | Bearer JWT |
+| `POST /api/v1/transactions` | Implemented | Bearer JWT (any active role) |
+| `PATCH /api/v1/transactions/outcome` | Implemented | Bearer JWT (`fraud_analyst`, `admin`) |
+| `GET /api/v1/alerts` | Implemented | Bearer JWT (`fraud_analyst`, `admin`) |
+| `GET /api/v1/alerts/{id}` | Implemented | Bearer JWT (`fraud_analyst`, `admin`) |
+| `PATCH /api/v1/alerts/{id}` | Implemented | Bearer JWT (`fraud_analyst`, `admin`) |
+
+### Roles
+
+* `customer` — default role from public registration; can submit
+  transactions and access own profile (via `/auth/me`).
+* `fraud_analyst` — can list, view, and update alerts; can submit
+  outcome feedback.
+* `admin` — all analyst permissions.
+
+Role escalation through the public API is impossible: registration
+  ignores any client-supplied role, and roles are carried inside the
+  signed JWT (tampering invalidates the signature).
+
+### JWT details
+
+* Signed HS256 tokens with claims `sub` (user ID), `role`, `type`
+  (`access` / `refresh`), `iat`, `exp`.
+* Access tokens expire after 30 minutes (response `expires_in: 1800`);
+  refresh tokens after 7 days.
+* Access and refresh tokens are type-checked — one cannot be used in
+  place of the other.
+* `analyst_id` on alert updates is always taken from the authenticated
+  identity (`sub` claim); clients cannot set or override it.
+
+### Clarifications / deviations
+
+* `POST /auth/refresh` is authenticated by the **refresh token in the
+  request body** (per its request schema) rather than a Bearer header.
+* Validation failures return **422** with FastAPI's standard error
+  body (the contract's 400 "validation" case is subsumed by 422,
+  consistent with all other implemented endpoints).
+* Duplicate registration returns **409**; login failures return
+  **401** with an identical body for unknown email and wrong password
+  (no account enumeration); inactive accounts receive **403**.
+
+### Customer identity enforcement (Step 41)
+
+* `customer_id` in transaction and alert responses is derived
+  server-side from the authenticated user's JWT (`sub` → user record
+  → `customer_id`).  The client cannot supply or override it.
+* `TransactionCreate` has no `customer_id` field — it is not part of
+  the request contract.
+* The backend injects the authenticated `customer_id` into the ML
+  service payload so customer-specific historical features use the
+  correct identity.
+* Alerts created from HOLD decisions carry the authenticated
+  customer's `customer_id`.
+* `PATCH /transactions/outcome` remains analyst/admin only; the
+  endpoint accepts `customer_id` in the request body (analysts label
+  any customer's transactions).
+
+### ML service production hardening (Step 42)
+
+**Health / readiness endpoints** (ML service on port 8001):
+
+| Endpoint | Purpose | Response |
+|----------|---------|----------|
+| `GET /live` | Liveness probe — process alive | `{"status": "alive"}` — always 200 |
+| `GET /ready` | Readiness probe — model loaded | 200 `{"status": "ready", ...}` or 503 `{"status": "not_ready"}` |
+| `GET /health` | Legacy health check | `{"status": "ready"|"model_unavailable", ...}` |
+
+**ML failure behaviour:**
+
+| Condition | HTTP status | Detail message |
+|-----------|-------------|----------------|
+| Model not loaded | 503 | Safe message (no paths/secrets) |
+| Invalid transaction data | 422 | Controlled validation message |
+| Internal prediction failure | 500 | "Prediction processing failed." |
+| Feature engineering error | 422 | Controlled message |
+
+**Input validation hardening (Step 42):**
+
+* `amount`: `(0, 10,000,000]` — rejects zero, negative, and excessive values.
+* `currency`: `^[A-Z]{3}$` — ISO 4217 uppercase 3-letter code.
+* `ProductCD`: `^[WXYZS]$` — valid product codes only.
+* `id_19`, `id_20`: max 100 chars. `DeviceType`: max 50 chars.
+* All error responses are JSON with `detail` field — no stack traces or internal paths.
+
+**Timeout configuration:**
+
+* Backend → ML service timeout: `ML_REQUEST_TIMEOUT_SECONDS` (default 5s).
+* Connection errors, timeouts, and HTTP errors are mapped to
+  `MLServiceUnavailableError`, `MLServiceTimeoutError`, or
+  `MLServiceResponseError` and surfaced as **503** to API clients.
+
+**Concurrency safety:**
+
+* Model loaded once at startup; read-only during prediction.
+* SHAP explainer initialisation is thread-safe (double-checked lock).
+* History store uses `threading.Lock` for thread-safe concurrent access.
+* Global exception handler catches unhandled errors without leaking internals.
+
+### Configuration
+
+See `.env.example`. Key variables: `BACKEND_SECRET_KEY` (JWT signing
+secret — **must** be overridden with a strong random value outside
+local development), `BACKEND_ACCESS_TOKEN_EXPIRE_MINUTES`,
+`JWT_ALGORITHM`, `JWT_REFRESH_TOKEN_EXPIRE_DAYS`, `USER_DB_PATH`,
+`ALERT_DB_PATH`.
+
+Internal roles (`fraud_analyst`, `admin`) are provisioned for
+local development with:
+
+```
+python -m backend.db.seed_users
+```
+
+(seeds `analyst@example.com` / `admin@example.com` with generated or
+`SEED_*`-environment-supplied passwords; idempotent).
