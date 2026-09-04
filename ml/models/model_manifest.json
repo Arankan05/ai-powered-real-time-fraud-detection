@@ -1,7 +1,7 @@
 {
-  "artifact_checksum": "f12d0d2e870231451f7ac10a76b390ef2e8e05c98c22aca4808c454812f796a7",
+  "artifact_checksum": "a87ce11370bfab3da9d9a77382aa6386a97fb68fd8da65e1e6b77fa8fc727239",
   "artifact_filename": "fraud_xgb_tuned.joblib",
-  "created_at": "2026-09-03T10:12:41.083813+00:00",
+  "created_at": "2026-09-04T10:00:15.462419+00:00",
   "feature_schema_version": "1.0.0",
   "model_name": "fraud-xgb",
   "model_version": "fraud-xgb-v1.0.0",

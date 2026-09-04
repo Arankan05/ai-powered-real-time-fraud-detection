@@ -76,6 +76,10 @@ _idempotency_store = None
 # Step 45: audit repository — set at app startup
 _audit_repo = None
 
+# Transaction repository — set at app startup (PostgreSQL persistence
+# of submitted transactions with their fraud results)
+_transaction_repo = None
+
 
 def set_ml_client(client: MLServiceClient) -> None:
     """Set the ML service client (called during app startup)."""
@@ -99,6 +103,12 @@ def set_audit_repository(repo: Any) -> None:
     """Set the audit repository (called during app startup)."""
     global _audit_repo
     _audit_repo = repo
+
+
+def set_transaction_repository(repo: Any) -> None:
+    """Set the transaction repository (called during app startup)."""
+    global _transaction_repo
+    _transaction_repo = repo
 
 
 def get_ml_client() -> MLServiceClient:
@@ -279,6 +289,54 @@ async def create_transaction(
         # Legacy path — ml_result.explanation is list[MLFactor]
         explanation = MLExplanation(
             ml_top_factors=list(ml_result.explanation),
+        )
+
+    # Persist the transaction with its fraud result (Alembic schema).
+    # A decision that is not durably recorded must not be reported as
+    # success — persistence failure is a hard 500, and the idempotency
+    # record (if any) is marked failed so the client may retry.
+    # Analysts have no customer identity (customer_id is None); the
+    # transactions table requires one, so those submissions stay
+    # unpersisted (warning logged) and remain covered by the audit trail.
+    if _transaction_repo is not None and customer_id is not None:
+        expl_json = explanation.model_dump() if explanation is not None else None
+        try:
+            _transaction_repo.create(
+                transaction_id=transaction_id,
+                customer_id=customer_id,
+                amount=request.amount,
+                currency=request.currency,
+                transaction_type=request.transaction_type,
+                location_country=request.location_country,
+                location_city=request.location_city,
+                device_fingerprint=request.device_fingerprint,
+                device_type=request.device_type,
+                ip_address=request.ip_address,
+                ml_score=ml_result.ml_score,
+                behaviour_score=ml_result.behaviour_score,
+                rule_score=ml_result.rule_score,
+                risk_score=ml_result.risk_score,
+                risk_level=ml_result.risk_level,
+                decision=ml_result.decision,
+                explanation_json=expl_json,
+                model_version=ml_result.model_version,
+                status="COMPLETED",
+            )
+        except Exception:
+            logger.error(
+                "Failed to persist transaction %s", transaction_id, exc_info=True
+            )
+            if key is not None and _idempotency_store is not None:
+                _idempotency_store.mark_failed(customer_id, key)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to record transaction.",
+            )
+    elif customer_id is None:
+        logger.warning(
+            "Transaction %s submitted without customer identity; "
+            "not persisted to the transactions table",
+            transaction_id,
         )
 
     # Step 45: audit successful ML decision

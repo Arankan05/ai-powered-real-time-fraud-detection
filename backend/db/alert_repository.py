@@ -451,6 +451,20 @@ class SQLiteAlertRepository:
 # ── PostgreSQL implementation ─────────────────────────────────────────
 
 
+# Ordered column list of the legacy (Step-40) ``alerts`` schema.  The
+# authoritative Alembic schema (``4e7709c2bfad``) defines a narrower
+# table — no transaction-denormalisation columns and no ``updated_at`` —
+# so INSERT/UPDATE statements adapt to the column set the live table
+# actually has (see :meth:`PostgresAlertRepository._alert_columns`).
+_ALERT_COLUMNS: tuple[str, ...] = (
+    "id", "transaction_id", "customer_id", "amount", "currency",
+    "merchant_name", "transaction_type", "timestamp", "risk_score",
+    "risk_level", "decision", "fraud_probability", "model_version",
+    "risk_factors", "explanation_json", "status", "analyst_id", "notes",
+    "created_at", "updated_at", "resolved_at",
+)
+
+
 class PostgresAlertRepository:
     """PostgreSQL-backed alert repository (production persistence).
 
@@ -460,6 +474,10 @@ class PostgresAlertRepository:
 
     Constructing a repository automatically ensures the backing schema
     exists via :func:`backend.db.postgres.init_schema` — idempotent.
+
+    The repository also runs against the authoritative Alembic schema,
+    where ``alerts`` is narrower (no denormalised transaction fields,
+    no ``updated_at``); statements adapt to the live column set.
 
     A ``UNIQUE`` index on ``transaction_id`` (``uq_alerts_transaction_id``)
     is the database-level guard against duplicate alerts per transaction;
@@ -471,6 +489,34 @@ class PostgresAlertRepository:
         self._pool = pool
         from backend.db.postgres import init_schema  # local import avoids cycle
         init_schema(pool)
+
+    # ── Schema adaptation ──────────────────────────────────────────────
+
+    def _alert_columns(self) -> frozenset[str]:
+        """Return the live ``alerts`` column set (detected once, cached).
+
+        Two schemas are supported: the legacy Step-40 table (created by
+        :func:`backend.db.postgres.init_schema`, 22 columns) and the
+        narrower authoritative Alembic table (11 columns).  Detection
+        is lazy so that instances constructed via ``__new__`` (bypassing
+        ``__init__``, as done in the test suite) also adapt correctly.
+        """
+        columns = self.__dict__.get("_columns")
+        if columns is None:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT column_name FROM information_schema.columns
+                           WHERE table_schema = current_schema()
+                             AND table_name = 'alerts'"""
+                    )
+                    columns = frozenset(row[0] for row in cur.fetchall())
+            if not columns:
+                raise RuntimeError(
+                    "alerts table not found in the active schema"
+                )
+            self._columns = columns
+        return columns
 
     # ── AlertRepository Protocol ────────────────────────────────────────
 
@@ -506,26 +552,20 @@ class PostgresAlertRepository:
             "updated_at": now,
             "resolved_at": None,
         }
+        # Adaptive column list: the legacy Step-40 schema and the
+        # authoritative Alembic schema define different ``alerts``
+        # tables — insert only the columns the live table has.  Column
+        # names come from the module constant ∩ information_schema, so
+        # interpolating them into the SQL is safe.
+        columns = [c for c in _ALERT_COLUMNS if c in self._alert_columns()]
+        col_sql = ", ".join(columns)
+        val_sql = ", ".join("%(" + c + ")s" for c in columns)
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """\
-                        INSERT INTO alerts (
-                            id, transaction_id, customer_id, amount, currency,
-                            merchant_name, transaction_type, timestamp, risk_score,
-                            risk_level, decision, fraud_probability, model_version,
-                            risk_factors, explanation_json, status, analyst_id, notes,
-                            created_at, updated_at, resolved_at
-                        ) VALUES (
-                            %(id)s, %(transaction_id)s, %(customer_id)s, %(amount)s,
-                            %(currency)s, %(merchant_name)s, %(transaction_type)s,
-                            %(timestamp)s, %(risk_score)s, %(risk_level)s, %(decision)s,
-                            %(fraud_probability)s, %(model_version)s, %(risk_factors)s,
-                            %(explanation_json)s, %(status)s, %(analyst_id)s, %(notes)s,
-                            %(created_at)s, %(updated_at)s, %(resolved_at)s
-                        )""",
-                        row,
+                        f"INSERT INTO alerts ({col_sql}) VALUES ({val_sql})",
+                        {c: row[c] for c in columns},
                     )
         except pg_errors.UniqueViolation:
             # Duplicate transaction_id (race): fall back to lookup
@@ -650,13 +690,18 @@ class PostgresAlertRepository:
                     updated_analyst = analyst_uuid
                 updated_notes = notes if notes is not None else row["notes"]
 
+                # Adaptive SET list: the Alembic ``alerts`` table has
+                # no ``updated_at`` column.
+                set_sql = ["status = %s", "notes = %s", "analyst_id = %s"]
+                set_vals: list[Any] = [new_status, updated_notes, updated_analyst]
+                if "updated_at" in self._alert_columns():
+                    set_sql.append("updated_at = %s")
+                    set_vals.append(now)
+                set_sql.append("resolved_at = %s")
+                set_vals.append(resolved_at)
                 cur.execute(
-                    """\
-                    UPDATE alerts SET
-                        status = %s, notes = %s, analyst_id = %s,
-                        updated_at = %s, resolved_at = %s
-                    WHERE id = %s""",
-                    (new_status, updated_notes, updated_analyst, now, resolved_at, aid),
+                    f"UPDATE alerts SET {', '.join(set_sql)} WHERE id = %s",
+                    (*set_vals, aid),
                 )
                 cur.execute("SELECT * FROM alerts WHERE id = %s", (aid,))
                 updated_row = cur.fetchone()

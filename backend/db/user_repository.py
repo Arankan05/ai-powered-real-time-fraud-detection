@@ -330,6 +330,31 @@ class PostgresUserRepository:
         from backend.db.postgres import init_schema  # local import avoids cycle
         init_schema(pool)
 
+    # ── Schema adaptation ──────────────────────────────────────────────
+
+    def _has_customers_table(self) -> bool:
+        """Return whether the active schema has a ``customers`` table.
+
+        The deployed schema (Alembic ``4e7709c2bfad``) separates customer
+        profiles from login accounts; the legacy Step-40 schema created
+        by :func:`backend.db.postgres.init_schema` has a single ``users``
+        table (with ``address``) and no ``customers`` table.  Detection is
+        lazy so that instances constructed via ``__new__`` (bypassing
+        ``__init__``, as done in the test suite) also adapt correctly.
+        """
+        flag = self.__dict__.get("_customers_table")
+        if flag is None:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT 1 FROM information_schema.tables
+                           WHERE table_schema = current_schema()
+                             AND table_name = 'customers'"""
+                    )
+                    flag = cur.fetchone() is not None
+            self._customers_table = flag
+        return flag
+
     # ── UserRepository Protocol ────────────────────────────────────────
 
     def create_user(
@@ -356,23 +381,63 @@ class PostgresUserRepository:
             address=address,
             is_active=is_active,
         )
+        # The deployed schema (alembic 4e7709c2bfad) has no ``address``
+        # column on ``users`` — the address belongs to ``customers`` — and
+        # enforces an FK from ``users.customer_id`` to ``customers.id``.
+        # Mirror ``app.repositories.auth.create_customer_and_user``: insert
+        # the customer profile first, then the linked user, in a single
+        # transaction.  Internal roles (fraud_analyst/admin) get no
+        # customer profile, so their user row stores ``customer_id=NULL``.
+        # The legacy Step-40 schema has no ``customers`` table; there the
+        # original single-table INSERT (including ``address``) is used.
+        row = dict(user)
+        has_customers = self._has_customers_table()
+        if has_customers and user["role"] != CUSTOMER:
+            row["customer_id"] = None
         try:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """\
-                        INSERT INTO users (
-                            id, email, password_hash, role, first_name, last_name,
-                            phone, date_of_birth, address, customer_id, is_active,
-                            created_at
-                        ) VALUES (
-                            %(id)s, %(email)s, %(password_hash)s, %(role)s,
-                            %(first_name)s, %(last_name)s, %(phone)s,
-                            %(date_of_birth)s, %(address)s, %(customer_id)s,
-                            %(is_active)s, %(created_at)s
-                        )""",
-                        user,
-                    )
+                    if has_customers:
+                        if user["role"] == CUSTOMER:
+                            cur.execute(
+                                """\
+                                INSERT INTO customers (
+                                    id, first_name, last_name, phone,
+                                    date_of_birth, address
+                                ) VALUES (
+                                    %(customer_id)s, %(first_name)s, %(last_name)s,
+                                    %(phone)s, %(date_of_birth)s, %(address)s
+                                )""",
+                                row,
+                            )
+                        cur.execute(
+                            """\
+                            INSERT INTO users (
+                                id, email, password_hash, role, first_name, last_name,
+                                phone, date_of_birth, customer_id, is_active, created_at
+                            ) VALUES (
+                                %(id)s, %(email)s, %(password_hash)s, %(role)s,
+                                %(first_name)s, %(last_name)s, %(phone)s,
+                                %(date_of_birth)s, %(customer_id)s,
+                                %(is_active)s, %(created_at)s
+                            )""",
+                            row,
+                        )
+                    else:
+                        cur.execute(
+                            """\
+                            INSERT INTO users (
+                                id, email, password_hash, role, first_name, last_name,
+                                phone, date_of_birth, address, customer_id, is_active,
+                                created_at
+                            ) VALUES (
+                                %(id)s, %(email)s, %(password_hash)s, %(role)s,
+                                %(first_name)s, %(last_name)s, %(phone)s,
+                                %(date_of_birth)s, %(address)s, %(customer_id)s,
+                                %(is_active)s, %(created_at)s
+                            )""",
+                            row,
+                        )
         except pg_errors.UniqueViolation:
             raise UserAlreadyExistsError(user["email"])
         return user

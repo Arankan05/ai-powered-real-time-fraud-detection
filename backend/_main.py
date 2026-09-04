@@ -59,6 +59,7 @@ from backend.routers.transactions import (
     set_audit_repository as set_txn_audit_repo,
     set_idempotency_store as set_txn_idempotency_store,
     set_ml_client,
+    set_transaction_repository as set_txn_transaction_repo,
 )
 from backend.security.deps import set_user_repository
 from backend.services.ml_client import MLServiceClient
@@ -70,6 +71,7 @@ settings = get_settings()
 # Module-level repository references — populated by lifespan()
 _alert_repo = None
 _user_repo = None
+_transaction_repo = None  # set when PERSISTENCE_BACKEND=postgres
 _pg_pool = None  # set when PERSISTENCE_BACKEND=postgres
 
 
@@ -123,7 +125,7 @@ def _init_postgres() -> None:
     string) is raised — uvicorn logs it and exits without ever serving
     requests.
     """
-    global _alert_repo, _user_repo, _pg_pool
+    global _alert_repo, _user_repo, _transaction_repo, _pg_pool
 
     # Imported lazily so that SQLite-only runs never pull in psycopg
     # (useful for slim CI images that only run the Step-39 test suite).
@@ -148,6 +150,12 @@ def _init_postgres() -> None:
     set_alert_repository(_alert_repo)
     set_txn_alert_repo(_alert_repo)
     set_user_repository(_user_repo)
+
+    # Transactions (Alembic schema) — persists every customer
+    # transaction together with its fraud decision.
+    from backend.db.transaction_repository import PostgresTransactionRepository
+    _transaction_repo = PostgresTransactionRepository(_pg_pool)
+    set_txn_transaction_repo(_transaction_repo)
 
     # Step 44: idempotency store — PostgreSQL-backed
     from backend.db.idempotency_store import PostgresIdempotencyStore
@@ -193,6 +201,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(
             f"Unknown PERSISTENCE_BACKEND {backend_name!r}: expected 'postgres' or 'sqlite'"
         )
+
+    # Keep transactions.model_version (FK → model_metadata.model_version)
+    # satisfiable: register the model the ML service reports as active
+    # (idempotent upsert).  Best-effort — if the ML service is briefly
+    # down at startup the application still serves; a missing
+    # registration then surfaces as a hard transaction-persistence
+    # error rather than silent data loss.
+    if _transaction_repo is not None:
+        try:
+            identity = (await client.health()).get("model_identity") or {}
+            model_name = identity.get("model_name")
+            model_version = identity.get("model_version")
+            if model_name and model_version:
+                _transaction_repo.ensure_model_metadata(
+                    model_name=model_name,
+                    model_version=model_version,
+                )
+                logger.info(
+                    "Model metadata ensured for %s (%s)",
+                    model_version, model_name,
+                )
+            else:
+                logger.warning(
+                    "ML /health response missing model identity; "
+                    "model_metadata not seeded"
+                )
+        except Exception:
+            logger.warning(
+                "Could not seed model_metadata from ML /health", exc_info=True
+            )
 
     yield
 
