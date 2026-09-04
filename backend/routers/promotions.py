@@ -38,9 +38,6 @@ from backend.db.promotion_governance import (
     AUDIT_PROMOTION_CREATED,
     AUDIT_PROMOTION_MARKED_PROMOTED,
     AUDIT_PROMOTION_REJECTED,
-    ACTIVATION_CONSUMED,
-    ACTIVATION_NONE,
-    ACTIVATION_TOKEN_ISSUED,
     DuplicatePromotionError,
     InvalidTransitionError,
     PromotionGovernanceRepository,
@@ -51,12 +48,17 @@ from backend.db.promotion_governance import (
     STATUS_REJECTED,
 )
 from backend.db.activation_verification import (
+    ACTIVATION_CONSUMED,
+    ACTIVATION_NONE,
+    ACTIVATION_TOKEN_ISSUED,
     AUDIT_ACTIVATION_VERIFICATION_FAILED,
     AUDIT_ACTIVATION_VERIFICATION_PASSED,
     AUDIT_MODEL_ACTIVATED,
     ActivationTokenExpiredError,
     ActivationTokenReplayError,
     ActivationVerificationError,
+    ArtifactVerifier,
+    DefaultArtifactVerifier,
     VERIFICATION_BLOCKED,
     VERIFICATION_PASSED,
     consume_activation_authorization,
@@ -440,16 +442,23 @@ async def mark_promoted(
     return _record_to_response(record)
 
 
-# ── Step 51: Activation Verification ─────────────────────────────────
+# ── Steps 51/52: Activation Verification ──────────────────────────────
 
 # Module-level current production identity provider (set at startup or by tests)
 _production_identity_provider = None
+_artifact_verifier: ArtifactVerifier | None = None
 
 
 def set_production_identity_provider(provider: Any) -> None:
     """Set a callable that returns the current production model identity dict."""
     global _production_identity_provider
     _production_identity_provider = provider
+
+
+def set_artifact_verifier(verifier: ArtifactVerifier | None) -> None:
+    """Set the artifact verifier (called at startup or by tests)."""
+    global _artifact_verifier
+    _artifact_verifier = verifier
 
 
 def _get_current_production_identity() -> dict[str, Any]:
@@ -463,6 +472,30 @@ def _get_current_production_identity() -> dict[str, Any]:
         "schema_version": "unknown",
         "n_features": 0,
     }
+
+
+def _verify_artifact(record: dict[str, Any], production: dict[str, Any]) -> Any:
+    """Run artifact verification via the configured verifier.
+
+    Returns an ArtifactVerificationReport.  If no verifier is
+    configured, returns a fail-closed report (all False).
+    """
+    if _artifact_verifier is not None:
+        return _artifact_verifier.verify_candidate(
+            candidate_model_version=record.get("candidate_model_version", ""),
+            candidate_checksum=record.get("candidate_checksum", ""),
+            candidate_schema_version=record.get("candidate_schema_version", ""),
+            candidate_n_features=record.get("candidate_n_features", 0),
+            current_production_identity=production,
+        )
+    # No verifier configured — fail closed
+    from backend.db.activation_verification import ArtifactVerificationReport
+    return ArtifactVerificationReport(
+        artifact_exists=False,
+        checksum_valid=False,
+        schema_compatible=False,
+        feature_count_matches=False,
+    )
 
 
 @router.post(
@@ -488,9 +521,17 @@ async def activation_verify(
 
     current_production = _get_current_production_identity()
 
+    # Step 52: actually verify artifact (fail-closed — never assume exists)
+    artifact_report = _verify_artifact(record, current_production)
+
     result = verify_activation_preconditions(
         governance_record=record,
         current_production_identity=current_production,
+        candidate_artifact_exists=artifact_report.artifact_exists,
+        candidate_checksum_valid=artifact_report.checksum_valid,
+        candidate_schema_compatible=artifact_report.schema_compatible,
+        candidate_feature_count_matches=artifact_report.feature_count_matches,
+        candidate_is_not_already_active=artifact_report.is_not_already_active,
     )
 
     if result.status == VERIFICATION_PASSED:
@@ -583,6 +624,7 @@ async def activate_promotion(
             request.activation_token,
             expected_promotion_id=promotion_id,
             current_production_identity=current_production,
+            governance_record=record,
         )
     except ActivationTokenExpiredError:
         raise HTTPException(
@@ -600,9 +642,30 @@ async def activate_promotion(
             detail=str(exc),
         )
 
+    # Step 52: atomic CAS transition TOKEN_ISSUED → CONSUMED
     from datetime import datetime, timezone
     now_iso = datetime.now(timezone.utc).isoformat()
-    if hasattr(repo, "update_activation_status"):
+    if hasattr(repo, "try_transition_activation_status"):
+        cas_result = repo.try_transition_activation_status(
+            promotion_id,
+            expected_status=ACTIVATION_TOKEN_ISSUED,
+            new_status=ACTIVATION_CONSUMED,
+            consumed_at=now_iso,
+            actor_id=current_user["id"],
+        )
+        if cas_result is None:
+            # CAS failed — check why
+            refreshed = repo.get_by_id(promotion_id)
+            if refreshed and refreshed.get("activation_status") == ACTIVATION_CONSUMED:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Activation already consumed for this promotion.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Activation state transition failed — record may have changed.",
+            )
+    elif hasattr(repo, "update_activation_status"):
         repo.update_activation_status(
             promotion_id,
             activation_status=ACTIVATION_CONSUMED,

@@ -1,4 +1,4 @@
-"""Activation verification & safety gate — Step 51.
+"""Activation verification & safety gate — Steps 51/52.
 
 Production-safe verification layer between Step 50 governance approval
 and Step 46 model activation. Ensures that an authorized operator
@@ -9,12 +9,13 @@ What this module does
 1. Verifies all preconditions before activation:
    - Governance record exists and is APPROVED
    - Candidate identity is complete and consistent
-   - Candidate artifact exists and checksum matches
+   - Candidate artifact exists and checksum matches (Step 52: fail-closed)
    - Feature schema is compatible
    - Production baseline has not changed since approval
    - Gate decision was APPROVED
+   - Activation has not already been consumed (persistent check)
 2. Issues a short-lived, signed activation token.
-3. Consumes the token upon activation (prevents replay).
+3. Consumes the token upon activation (prevents replay, restart-safe).
 
 What this module NEVER does
 ----------------------------
@@ -22,6 +23,7 @@ What this module NEVER does
 * It never modifies the production manifest, threshold, or runtime.
 * It never hot-swaps the active model.
 * It never trusts client-supplied model identity.
+* It never assumes an artifact exists without verification.
 
 Activation token
 ----------------
@@ -37,6 +39,7 @@ Token properties:
 - Scoped to one promotion
 - Single-use (consumed on activation)
 - Rejected after expiry or if promotion state changes
+- Restart-safe: consumed tokens remain rejected after process restart
 
 Security
 --------
@@ -44,6 +47,7 @@ Security
 - No secrets, raw data, or artifacts in the token.
 - Actor identity always from JWT.
 - Fail-closed: any verification failure blocks activation.
+- Artifact existence is NEVER assumed (Step 52 hardening).
 """
 
 from __future__ import annotations
@@ -76,6 +80,10 @@ __all__ = [
     "ActivationTokenReplayError",
     "ActivationVerificationResult",
     "ActivationAuthorization",
+    "ArtifactVerificationReport",
+    "ArtifactVerifier",
+    "DefaultArtifactVerifier",
+    "NoOpArtifactVerifier",
     "verify_activation_preconditions",
     "issue_activation_token",
     "validate_activation_token",
@@ -233,10 +241,10 @@ def verify_activation_preconditions(
     *,
     governance_record: dict[str, Any],
     current_production_identity: dict[str, Any],
-    candidate_artifact_exists: bool = True,
-    candidate_checksum_valid: bool = True,
-    candidate_schema_compatible: bool = True,
-    candidate_feature_count_matches: bool = True,
+    candidate_artifact_exists: bool = False,
+    candidate_checksum_valid: bool = False,
+    candidate_schema_compatible: bool = False,
+    candidate_feature_count_matches: bool = False,
     candidate_is_not_already_active: bool = True,
 ) -> ActivationVerificationResult:
     """Verify all preconditions for activation.
@@ -245,6 +253,11 @@ def verify_activation_preconditions(
     Returns a result with status READY_FOR_ACTIVATION or ACTIVATION_BLOCKED.
 
     Fail-closed: any missing or invalid precondition blocks activation.
+
+    Step 52 hardening: artifact-related flags now default to ``False``
+    so that verification cannot pass unless the caller has *explicitly*
+    confirmed artifact existence, checksum, schema, and feature count
+    through actual verification (not assumed defaults).
     """
     reasons: list[str] = []
 
@@ -412,22 +425,211 @@ def validate_activation_token(
     )
 
 
+# ── Artifact verification (Step 52 hardening) ─────────────────────────
+
+
+class ArtifactVerificationReport:
+    """Result of artifact verification — bounded, safe."""
+
+    def __init__(
+        self,
+        *,
+        artifact_exists: bool,
+        checksum_valid: bool,
+        schema_compatible: bool,
+        feature_count_matches: bool,
+        is_not_already_active: bool = True,
+    ) -> None:
+        self.artifact_exists = artifact_exists
+        self.checksum_valid = checksum_valid
+        self.schema_compatible = schema_compatible
+        self.feature_count_matches = feature_count_matches
+        self.is_not_already_active = is_not_already_active
+
+
+@runtime_checkable
+class ArtifactVerifier(Protocol):
+    """Abstract contract for candidate artifact verification.
+
+    Implementations must verify the artifact *independently* — never
+    trust caller-supplied flags.
+    """
+
+    def verify_candidate(
+        self,
+        *,
+        candidate_model_version: str,
+        candidate_checksum: str,
+        candidate_schema_version: str,
+        candidate_n_features: int,
+        current_production_identity: dict[str, Any],
+    ) -> ArtifactVerificationReport:
+        """Verify the candidate artifact.
+
+        Must check:
+        - artifact exists and is readable
+        - artifact path is safe (no traversal)
+        - checksum matches
+        - schema is compatible
+        - feature count matches
+        - candidate is not already the active model
+        """
+        ...
+
+
+class DefaultArtifactVerifier:
+    """Artifact verifier that uses the Step 46 integrity module.
+
+    Verifies candidate artifacts against the model directory using
+    the existing ``ml.predict.integrity`` functions.  If the model
+    directory is not configured or the manifest is unavailable,
+    verification fails closed (all flags False).
+    """
+
+    def __init__(self, model_directory: str | None = None) -> None:
+        self._model_directory = model_directory
+
+    def verify_candidate(
+        self,
+        *,
+        candidate_model_version: str,
+        candidate_checksum: str,
+        candidate_schema_version: str,
+        candidate_n_features: int,
+        current_production_identity: dict[str, Any],
+    ) -> ArtifactVerificationReport:
+        """Verify candidate artifact using Step 46 integrity checks."""
+        try:
+            from ml.predict.integrity import (
+                compute_checksum,
+                load_manifest,
+                safe_artifact_path,
+                _FEATURE_SCHEMA_VERSION,
+            )
+            from pathlib import Path
+        except ImportError:
+            return ArtifactVerificationReport(
+                artifact_exists=False,
+                checksum_valid=False,
+                schema_compatible=False,
+                feature_count_matches=False,
+            )
+
+        # Determine model directory
+        if self._model_directory:
+            model_dir = Path(self._model_directory)
+        else:
+            try:
+                from ml.predict.integrity import _DEFAULT_MODEL_DIR
+                model_dir = _DEFAULT_MODEL_DIR
+            except Exception:
+                return ArtifactVerificationReport(
+                    artifact_exists=False,
+                    checksum_valid=False,
+                    schema_compatible=False,
+                    feature_count_matches=False,
+                )
+
+        # 1. Load manifest — fail closed if unavailable
+        try:
+            manifest = load_manifest(model_dir)
+        except Exception:
+            return ArtifactVerificationReport(
+                artifact_exists=False,
+                checksum_valid=False,
+                schema_compatible=False,
+                feature_count_matches=False,
+            )
+
+        # 2. Check artifact exists (path safety via safe_artifact_path)
+        try:
+            artifact_path = safe_artifact_path(model_dir, manifest.artifact_filename)
+            artifact_exists = artifact_path.exists()
+        except Exception:
+            return ArtifactVerificationReport(
+                artifact_exists=False,
+                checksum_valid=False,
+                schema_compatible=False,
+                feature_count_matches=False,
+            )
+
+        if not artifact_exists:
+            return ArtifactVerificationReport(
+                artifact_exists=False,
+                checksum_valid=False,
+                schema_compatible=False,
+                feature_count_matches=False,
+            )
+
+        # 3. Verify checksum against both candidate identity and manifest
+        try:
+            actual_checksum = compute_checksum(artifact_path)
+            checksum_valid = (
+                actual_checksum == candidate_checksum
+                and actual_checksum == manifest.artifact_checksum
+            )
+        except Exception:
+            checksum_valid = False
+
+        # 4. Schema compatibility
+        schema_compatible = (
+            candidate_schema_version
+            and manifest.feature_schema_version == candidate_schema_version
+            and manifest.feature_schema_version == _FEATURE_SCHEMA_VERSION
+        )
+
+        # 5. Feature count
+        feature_count_matches = (
+            manifest.n_features == candidate_n_features
+            and candidate_n_features > 0
+        )
+
+        # 6. Not already the active production model
+        prod_version = current_production_identity.get("model_version", "")
+        prod_checksum = current_production_identity.get("checksum", "")
+        is_not_already_active = not (
+            candidate_model_version == prod_version
+            and candidate_checksum == prod_checksum
+        )
+
+        return ArtifactVerificationReport(
+            artifact_exists=artifact_exists,
+            checksum_valid=checksum_valid,
+            schema_compatible=schema_compatible,
+            feature_count_matches=feature_count_matches,
+            is_not_already_active=is_not_already_active,
+        )
+
+
+class NoOpArtifactVerifier:
+    """Verifier that always fails closed (for tests without artifacts)."""
+
+    def verify_candidate(self, **kwargs: Any) -> ArtifactVerificationReport:
+        return ArtifactVerificationReport(
+            artifact_exists=False,
+            checksum_valid=False,
+            schema_compatible=False,
+            feature_count_matches=False,
+        )
+
+
 # ── Consumption tracking ──────────────────────────────────────────────
 
 
-# Module-level consumed token store (for in-memory mode)
+# Module-level consumed token store (secondary cache for in-process replay
+# prevention; the governance record's activation_status is authoritative).
 _consumed_tokens: set[str] = set()
 _consumed_lock = __import__("threading").Lock()
 
 
 def mark_token_consumed(token_id: str) -> None:
-    """Mark a token as consumed (prevent replay)."""
+    """Mark a token as consumed in the in-process cache."""
     with _consumed_lock:
         _consumed_tokens.add(token_id)
 
 
 def is_token_consumed(token_id: str) -> bool:
-    """Check if a token has already been consumed."""
+    """Check if a token has already been consumed (in-process cache)."""
     with _consumed_lock:
         return token_id in _consumed_tokens
 
@@ -443,35 +645,56 @@ def consume_activation_authorization(
     *,
     expected_promotion_id: str,
     current_production_identity: dict[str, Any],
+    governance_record: dict[str, Any] | None = None,
 ) -> ActivationAuthorization:
     """Validate and consume an activation authorization.
 
     This is the final step before activation. It:
     1. Validates the token signature and expiration.
-    2. Checks the token hasn't been consumed (replay prevention).
-    3. Marks the token as consumed.
-    4. Returns the authorization for the caller to perform activation.
+    2. Checks the governance record's persistent activation_status
+       (authoritative — survives restarts).
+    3. Checks the in-process consumed-token cache (fast replay check).
+    4. Marks the token as consumed in the in-process cache.
+    5. Returns the authorization for the caller to perform activation.
+
+    Step 52 hardening: the governance record's activation_status is
+    the authoritative source. Even after a process restart, a token
+    whose governance record shows CONSUMED is rejected.
 
     Raises:
-        ActivationVerificationError: Invalid token.
+        ActivationVerificationError: Invalid token or governance changed.
         ActivationTokenExpiredError: Token expired.
         ActivationTokenReplayError: Token already consumed.
     """
-    # Validate first
+    # Validate token signature, expiry, promotion ID, production baseline
     auth = validate_activation_token(
         token,
         expected_promotion_id=expected_promotion_id,
         current_production_identity=current_production_identity,
     )
 
-    # Extract token_id from the payload for replay check
+    # Persistent replay check: governance record's activation_status
+    if governance_record is not None:
+        activation_status = governance_record.get("activation_status", ACTIVATION_NONE)
+        if activation_status == ACTIVATION_CONSUMED:
+            raise ActivationTokenReplayError(
+                "Activation already consumed for this promotion"
+            )
+        # Also reject if governance is no longer APPROVED
+        gov_status = governance_record.get("governance_status")
+        if gov_status != STATUS_APPROVED:
+            raise ActivationVerificationError(
+                f"Governance status changed to {gov_status} since verification"
+            )
+
+    # In-process replay check (fast path)
     payload = _verify_token(token)
     token_id = payload.get("token_id", "")
 
     if is_token_consumed(token_id):
         raise ActivationTokenReplayError("Activation token already consumed")
 
-    # Mark as consumed
+    # Mark as consumed in the in-process cache
     mark_token_consumed(token_id)
 
     return auth

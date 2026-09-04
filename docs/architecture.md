@@ -322,3 +322,21 @@ approval and Step 46 model activation:
   automatic activation occurs.
 - Full documentation: `docs/ml-architecture.md` (Activation
   Verification, Step 51).
+
+**Step 52 (final activation safety hardening) is complete.**
+Hardens the two genuine limitations from Step 51:
+
+- **Fail-closed artifact verification**: candidate artifact
+  existence is never assumed True. The `ArtifactVerifier` protocol
+  provides pluggable verification — the default implementation
+  reuses the Step 46 integrity module for independent checksum,
+  schema, and existence checks. If verification cannot be performed,
+  activation is BLOCKED.
+- **Persistent restart-safe token consumption**: the governance
+  record's `activation_status` is the authoritative source.
+  Consumed tokens remain rejected after process/backend/worker
+  restart. Atomic compare-and-set (CAS) transitions ensure exactly
+  one successful consumer under concurrency.
+- No new automatic activation or runtime hot-swap introduced.
+  Step 51 remains a safety gate; Step 46 remains the explicit
+  activation mechanism.

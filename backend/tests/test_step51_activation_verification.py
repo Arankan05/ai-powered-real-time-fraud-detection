@@ -33,6 +33,7 @@ from backend.db.activation_verification import (
     ACTIVATION_CONSUMED,
     ACTIVATION_NONE,
     ACTIVATION_TOKEN_ISSUED,
+    ArtifactVerificationReport,
     DEFAULT_TOKEN_LIFETIME_SECONDS,
     VERIFICATION_BLOCKED,
     VERIFICATION_PASSED,
@@ -46,6 +47,19 @@ from backend.db.activation_verification import (
     validate_activation_token,
     verify_activation_preconditions,
 )
+
+
+# Step 52: mock artifact verifier for tests that expect verification to pass
+class _PassingArtifactVerifier:
+    """Mock verifier that reports all artifact checks as passing."""
+    def verify_candidate(self, **kwargs):
+        return ArtifactVerificationReport(
+            artifact_exists=True,
+            checksum_valid=True,
+            schema_compatible=True,
+            feature_count_matches=True,
+            is_not_already_active=True,
+        )
 from backend.db.promotion_governance import (
     ACTIVATION_NONE as GOV_ACTIVATION_NONE,
     ACTIVATION_TOKEN_ISSUED as GOV_ACTIVATION_TOKEN_ISSUED,
@@ -120,6 +134,10 @@ class TestVerifyActivationPreconditions:
         result = verify_activation_preconditions(
             governance_record=record,
             current_production_identity=prod,
+            candidate_artifact_exists=True,
+            candidate_checksum_valid=True,
+            candidate_schema_compatible=True,
+            candidate_feature_count_matches=True,
         )
         assert result.status == VERIFICATION_PASSED
         assert result.reasons == []
@@ -251,6 +269,10 @@ class TestProductionBaselineProtection:
         result = verify_activation_preconditions(
             governance_record=record,
             current_production_identity=prod,
+            candidate_artifact_exists=True,
+            candidate_checksum_valid=True,
+            candidate_schema_compatible=True,
+            candidate_feature_count_matches=True,
         )
         assert result.status == VERIFICATION_PASSED
 
@@ -504,6 +526,7 @@ def client():
         set_governance_repository,
         set_audit_repository,
         set_production_identity_provider,
+        set_artifact_verifier,
         _production_identity_provider,
     )
     from backend.security.deps import set_user_repository
@@ -517,6 +540,9 @@ def client():
     # Default production identity provider matching _gate_fields()
     production_identity = _make_production_identity()
     set_production_identity_provider(lambda: dict(production_identity))
+
+    # Step 52: set mock artifact verifier (all checks pass)
+    set_artifact_verifier(_PassingArtifactVerifier())
 
     import tempfile, os
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -536,6 +562,7 @@ def client():
     app.dependency_overrides.clear()
     app.dependency_overrides.update(saved_overrides)
     set_production_identity_provider(None)
+    set_artifact_verifier(None)
     try:
         os.unlink(tmp.name)
     except OSError:

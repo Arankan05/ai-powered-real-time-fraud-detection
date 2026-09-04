@@ -866,15 +866,32 @@ raw transactions, customer data, or model artifacts are stored.
    `POST /api/v1/promotions/{id}/activate`.
 5. The governance record is updated to `CONSUMED` status.
 
+#### Step 52 hardening (final activation safety)
+
+Step 52 addresses the two known limitations from Step 51:
+
+1. **Fail-closed artifact verification**: candidate artifact
+   existence is NEVER assumed. The `ArtifactVerifier` protocol
+   provides pluggable verification — the `DefaultArtifactVerifier`
+   uses the Step 46 integrity module (`load_manifest`,
+   `safe_artifact_path`, `compute_checksum`) to independently
+   verify the candidate artifact. If no verifier is configured or
+   verification cannot be performed, activation is BLOCKED.
+
+2. **Persistent token consumption**: the governance record's
+   `activation_status` field is the authoritative source for
+   consumption state. Even after a process restart, a token whose
+   governance record shows `CONSUMED` is rejected. The in-memory
+   consumed-token set is a secondary fast-path cache only.
+   Atomic compare-and-set (CAS) transitions ensure that concurrent
+   consumption attempts allow exactly one successful consumer.
+
 #### Known limitations
 
-- Token consumption tracking is in-memory; a service restart clears
-  the consumed token store (but the governance record's
-  `activation_status` persists).
 - No cross-service token validation (tokens are only valid within
   the backend service).
-- No automatic artifact verification (candidate_artifact_exists
-  defaults to True unless explicitly checked by the caller).
+- Artifact verification requires a configured `ArtifactVerifier`;
+  if the model directory is not available, verification fails closed.
 
 ## Data Policy
 
@@ -884,4 +901,4 @@ raw transactions, customer data, or model artifacts are stored.
 
 ## Status
 
-Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation), centralized promotion governance & approval workflow (Step 50: authenticated governance records, state machine, PostgreSQL persistence, concurrency safety, audit trail integration — no automatic activation, approval ≠ activation), and promotion activation safety & verification gate (Step 51: pre-activation verification, HMAC-signed activation tokens, production baseline protection, replay prevention, fail-closed safety gate — no automatic activation, no hot-swap) are complete.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation), centralized promotion governance & approval workflow (Step 50: authenticated governance records, state machine, PostgreSQL persistence, concurrency safety, audit trail integration — no automatic activation, approval ≠ activation), promotion activation safety & verification gate (Step 51: pre-activation verification, HMAC-signed activation tokens, production baseline protection, replay prevention, fail-closed safety gate — no automatic activation, no hot-swap), and final activation safety hardening (Step 52: fail-closed artifact verification via ArtifactVerifier protocol, persistent restart-safe token consumption via governance record CAS, atomic state transitions — no artifact assumed exists, no in-memory-only consumption) are complete.

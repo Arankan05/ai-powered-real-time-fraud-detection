@@ -432,6 +432,34 @@ class InMemoryPromotionGovernanceStore:
             rec["updated_at"] = _now_iso()
             return dict(rec)
 
+    def try_transition_activation_status(
+        self,
+        promotion_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+        consumed_at: str | None = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically transition activation status (compare-and-set).
+
+        Returns the updated record on success, or ``None`` if the
+        current status does not match ``expected_status``.
+        """
+        with self._lock:
+            rec = self._records.get(promotion_id)
+            if rec is None:
+                raise PromotionNotFoundError(f"Promotion {promotion_id} not found")
+            if rec["activation_status"] != expected_status:
+                return None  # CAS failed
+            rec["activation_status"] = new_status
+            if consumed_at is not None:
+                rec["activation_consumed_at"] = consumed_at
+            if actor_id is not None:
+                rec["activation_actor_id"] = actor_id
+            rec["updated_at"] = _now_iso()
+            return dict(rec)
+
 
 # ── PostgreSQL implementation ────────────────────────────────────────
 
@@ -820,6 +848,59 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_gov_candidate_decision
                     f"UPDATE promotion_governance SET {set_clause} WHERE promotion_id = %(promotion_id)s",
                     updates,
                 )
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM promotion_governance WHERE promotion_id = %s",
+                    (pid,),
+                )
+                updated = cur.fetchone()
+
+        return self._row_to_dict(updated) if updated else None
+
+    def try_transition_activation_status(
+        self,
+        promotion_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+        consumed_at: str | None = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically transition activation status (compare-and-set).
+
+        Uses ``WHERE activation_status = expected_status`` for
+        transaction-safe CAS. Returns the updated record on success,
+        or ``None`` if the current status does not match.
+        """
+        pid = _coerce_uuid(promotion_id)
+        if pid is None:
+            raise PromotionNotFoundError(f"Invalid promotion ID: {promotion_id}")
+
+        now = _now_iso()
+        actor_uuid = _coerce_uuid(actor_id) if actor_id else None
+
+        updates: dict[str, Any] = {
+            "activation_status": new_status,
+            "updated_at": now,
+        }
+        if consumed_at is not None:
+            updates["activation_consumed_at"] = consumed_at
+        if actor_uuid is not None:
+            updates["activation_actor_id"] = actor_uuid
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                set_clause = ", ".join(f"{k} = %({k})s" for k in updates)
+                updates["promotion_id"] = pid
+                updates["expected_status"] = expected_status
+                cur.execute(
+                    f"UPDATE promotion_governance SET {set_clause} "
+                    f"WHERE promotion_id = %(promotion_id)s "
+                    f"AND activation_status = %(expected_status)s",
+                    updates,
+                )
+                if cur.rowcount == 0:
+                    return None  # CAS failed
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     "SELECT * FROM promotion_governance WHERE promotion_id = %s",
