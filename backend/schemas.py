@@ -357,3 +357,83 @@ class AuditTrailResponse(BaseModel):
 
     transaction_id: str
     events: list[AuditEventResponse]
+
+
+# ── Promotion Governance (Step 50) ───────────────────────────────────
+
+
+class PromotionCreateRequest(BaseModel):
+    """``POST /api/v1/promotions`` request — create from gate decision."""
+
+    gate_decision: str = Field(
+        ..., pattern=r"^(APPROVED|REJECTED)$",
+        description="Gate decision: APPROVED or REJECTED",
+    )
+    candidate_model_name: str = Field(..., min_length=1, max_length=100)
+    candidate_model_version: str = Field(..., min_length=1, max_length=100)
+    candidate_checksum: str = Field(..., min_length=1, max_length=128)
+    candidate_schema_version: str = Field(..., min_length=1, max_length=20)
+    candidate_n_features: int = Field(..., ge=1)
+    production_model_name: str = Field(..., min_length=1, max_length=100)
+    production_model_version: str = Field(..., min_length=1, max_length=100)
+    production_checksum: str = Field(..., min_length=1, max_length=128)
+    production_schema_version: str = Field(..., min_length=1, max_length=20)
+    production_n_features: int = Field(..., ge=1)
+    gate_report: dict[str, Any] | None = Field(
+        None, description="Bounded gate report (no raw data)",
+    )
+
+
+class PromotionResponse(BaseModel):
+    """Single promotion governance record."""
+
+    promotion_id: str
+    gate_decision: str
+    governance_status: str
+    candidate_model_name: str
+    candidate_model_version: str
+    candidate_checksum: str
+    candidate_schema_version: str
+    candidate_n_features: int
+    production_model_name: str
+    production_model_version: str
+    production_checksum: str
+    production_schema_version: str
+    production_n_features: int
+    reviewer_id: str | None = None
+    reviewer_role: str | None = None
+    reviewed_at: str | None = None
+    approval_comment: str | None = None
+    rejection_reason: str | None = None
+    execution_status: str | None = None
+    promoted_by: str | None = None
+    promoted_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class PromotionListResponse(BaseModel):
+    """Paginated list of promotion governance records."""
+
+    items: list[PromotionResponse]
+    total: int
+    page: int
+    per_page: int
+
+
+class PromotionApproveRequest(BaseModel):
+    """``POST /api/v1/promotions/{id}/approve`` request."""
+
+    comment: str | None = Field(
+        None, max_length=500,
+        description="Optional approval comment",
+    )
+
+
+class PromotionRejectRequest(BaseModel):
+    """``POST /api/v1/promotions/{id}/reject`` request."""
+
+    reason: str | None = Field(
+        None, max_length=500,
+        description="Rejection reason",
+    )

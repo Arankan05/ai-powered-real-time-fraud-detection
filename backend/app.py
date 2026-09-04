@@ -48,6 +48,11 @@ from backend.routers.audit import (
     set_audit_repository as set_audit_router_repo,
 )
 from backend.routers.auth import router as auth_router
+from backend.routers.promotions import (
+    router as promotions_router,
+    set_governance_repository,
+    set_audit_repository as set_promo_audit_repo,
+)
 from backend.routers.transactions import (
     router as transactions_router,
     set_alert_repository as set_txn_alert_repo,
@@ -100,7 +105,14 @@ def _init_sqlite() -> None:
     set_txn_audit_repo(_audit_store)
     set_alerts_audit_repo(_audit_store)
     set_audit_router_repo(_audit_store)
+    set_promo_audit_repo(_audit_store)
     logger.info("Audit store: in-memory")
+
+    # Step 50: promotion governance — in-memory for SQLite mode
+    from backend.db.promotion_governance import InMemoryPromotionGovernanceStore
+    _governance_store = InMemoryPromotionGovernanceStore()
+    set_governance_repository(_governance_store)
+    logger.info("Promotion governance: in-memory")
 
 
 def _init_postgres() -> None:
@@ -148,6 +160,12 @@ def _init_postgres() -> None:
     set_txn_audit_repo(_audit_repo_pg)
     set_alerts_audit_repo(_audit_repo_pg)
     set_audit_router_repo(_audit_repo_pg)
+    set_promo_audit_repo(_audit_repo_pg)
+
+    # Step 50: promotion governance — PostgreSQL-backed
+    from backend.db.promotion_governance import PostgresPromotionGovernanceRepository
+    _governance_repo_pg = PostgresPromotionGovernanceRepository(_pg_pool)
+    set_governance_repository(_governance_repo_pg)
 
     logger.info(
         "Persistence: PostgreSQL (host=%s port=%s db=%s)",
@@ -204,3 +222,4 @@ app.include_router(auth_router)
 app.include_router(transactions_router)
 app.include_router(alerts_router)
 app.include_router(audit_router)
+app.include_router(promotions_router)

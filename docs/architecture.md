@@ -277,3 +277,26 @@ gate decision for traceability and governance:
   state, the active manifest, or the production threshold.
 - Full documentation: `docs/ml-architecture.md` (Promotion History,
   Step 49) and `.env.example` (`PROMO_HISTORY_DIR` section).
+
+**Step 50 (centralized promotion governance & approval workflow) is complete.**
+A production-safe, authenticated approval workflow sits between the
+Step 48 promotion gate and the Step 46 model activation:
+
+- Governance records track the lifecycle: `PENDING → APPROVED → PROMOTED`
+  or `PENDING → REJECTED`. Invalid transitions are rejected.
+- Only `fraud_analyst` and `admin` roles may interact with promotions;
+  customers are denied access. Actor identity always comes from the JWT.
+- API endpoints: `POST /api/v1/promotions` (create),
+  `GET /api/v1/promotions` (list), `GET /api/v1/promotions/{id}` (detail),
+  `POST .../approve`, `POST .../reject`, `POST .../mark-promoted`.
+- PostgreSQL persistence with `SELECT ... FOR UPDATE` for concurrency
+  safety. Idempotency via unique constraint on candidate version +
+  checksum + gate decision.
+- Every governance event is audited through the Step 45 audit trail
+  (`PROMOTION_CREATED`, `PROMOTION_APPROVED`, `PROMOTION_REJECTED`,
+  `PROMOTION_MARKED_PROMOTED`).
+- Approval does NOT activate the model. The `PROMOTED` status only
+  records that the operator confirmed Step 46 activation. Production
+  model, manifest, and threshold are never modified by governance.
+- Full documentation: `docs/ml-architecture.md` (Promotion Governance,
+  Step 50) and `docs/api-contract.md` (Promotion Endpoints).

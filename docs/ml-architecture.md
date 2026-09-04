@@ -664,6 +664,97 @@ Exit codes: 0 success, 1 error.
 - History retention is bounded; old files are automatically removed
   when the limit is reached.
 
+### Promotion Governance (Step 50 — Centralized Approval Workflow)
+
+**Step 50 NEVER activates models automatically. Approval and
+activation are separate concepts. The production model, manifest, and
+threshold are never modified by governance operations.**
+
+#### Governance architecture
+
+- `backend/db/promotion_governance.py`: governance record model,
+  state machine, and repository (in-memory + PostgreSQL).
+- `backend/routers/promotions.py`: authenticated API endpoints for
+  creating, listing, approving, rejecting, and marking promotions.
+- `backend/schemas.py`: Pydantic request/response schemas.
+- Governance records are persisted in the `promotion_governance`
+  PostgreSQL table (created idempotently at startup).
+
+#### Governance state machine
+
+```
+PENDING → APPROVED → PROMOTED
+PENDING → REJECTED
+```
+
+- `PENDING` — gate decision recorded, awaiting human review.
+- `APPROVED` — reviewer approved; ready for Step 46 activation.
+- `REJECTED` — reviewer rejected the promotion.
+- `PROMOTED` — operator confirmed Step 46 activation completed.
+
+Invalid transitions (e.g. REJECTED → APPROVED, PROMOTED → PENDING)
+are rejected with HTTP 409.
+
+#### API endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/promotions` | POST | Create governance record from gate decision |
+| `/api/v1/promotions` | GET | List records (paginated, filterable) |
+| `/api/v1/promotions/{id}` | GET | Get single record |
+| `/api/v1/promotions/{id}/approve` | POST | Approve (PENDING → APPROVED) |
+| `/api/v1/promotions/{id}/reject` | POST | Reject (PENDING → REJECTED) |
+| `/api/v1/promotions/{id}/mark-promoted` | POST | Mark promoted (APPROVED → PROMOTED) |
+
+All endpoints require authentication. Only `fraud_analyst` and
+`admin` roles are authorised. Customers are denied (HTTP 403).
+
+#### Security controls
+
+- **Actor identity from JWT**: reviewer/approver identity always
+  comes from the authenticated JWT — never from the request payload.
+- **No impersonation**: clients cannot supply a reviewer ID.
+- **Role enforcement**: `require_roles("fraud_analyst", "admin")` on
+  all endpoints.
+- **Concurrency safety**: PostgreSQL uses `SELECT ... FOR UPDATE`
+  to prevent race conditions on concurrent approve/reject.
+- **Idempotency**: unique constraint on (candidate_version,
+  candidate_checksum, gate_decision) prevents duplicate records.
+- **Bounded inputs**: comments/reasons limited to 500 chars; model
+  versions to 100 chars; checksums to 128 chars.
+- **No automatic activation**: approval does not modify the manifest,
+  threshold, or runtime model.
+
+#### Audit trail integration
+
+Every governance event is recorded in the Step 45 audit trail:
+
+- `PROMOTION_CREATED` — governance record created
+- `PROMOTION_APPROVED` — reviewer approved
+- `PROMOTION_REJECTED` — reviewer rejected
+- `PROMOTION_MARKED_PROMOTED` — operator confirmed activation
+
+Audit records contain actor identity, promotion ID, and relevant
+model/promotion metadata. No raw data, secrets, or paths are stored.
+
+#### Operator workflow
+
+1. Run the promotion gate (Step 48): `python -m ml.evaluation.promotion_gate --candidate-model-dir <dir>`.
+2. If APPROVED, create a governance record: `POST /api/v1/promotions`.
+3. Review the record: `GET /api/v1/promotions/{id}`.
+4. Approve or reject: `POST .../approve` or `POST .../reject`.
+5. If approved and activation is warranted, perform Step 46 activation
+   (explicit operator action).
+6. Confirm activation: `POST .../mark-promoted`.
+
+#### Known limitations
+
+- Governance records are stored in the backend database; there is no
+  cross-service replication.
+- The governance workflow does not perform the Step 46 activation
+  itself — it only records that it was performed.
+- No notification mechanism (email/webhook) for pending approvals.
+
 ## Data Policy
 
 - **No real banking or customer data** is used at any stage.
@@ -672,4 +763,4 @@ Exit codes: 0 success, 1 error.
 
 ## Status
 
-Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), and promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation) are complete.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation), and centralized promotion governance & approval workflow (Step 50: authenticated governance records, state machine, PostgreSQL persistence, concurrency safety, audit trail integration — no automatic activation, approval ≠ activation) are complete.
