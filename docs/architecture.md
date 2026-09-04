@@ -163,11 +163,180 @@ The backend never calculates ML predictions, behaviour scores, or rule scores it
 
 ## Status
 
-**Step 42 (ML service production hardening) is complete.** The ML service
-now has separate liveness/readiness probes, hardened input validation,
-thread-safe SHAP explanation, controlled error handling (no information
-leakage), model output validation, and a global exception handler.
-Step 41 (customer identity isolation), Step 40 (PostgreSQL migration),
-Step 39 (JWT auth), Step 38 (alert system), Step 34 (risk aggregation),
-Step 33 (rule signals), Step 32 (outcome feedback), and Step 31
-(historical features) are all complete.
+**Step 44 (production decision pipeline) is complete.** The transaction
+endpoint now supports idempotent processing via `Idempotency-Key`
+header, explicit ML failure handling (no fabricated predictions),
+and decision consistency between response and persisted alerts.
+Step 43 (ML monitoring and observability), Step 42 (production
+hardening), Step 41 (customer identity isolation), Step 40
+(PostgreSQL migration), and all earlier steps are complete.
+
+**Step 45 (fraud decision audit trail) is complete.** An append-only
+audit trail records all important fraud decision events:
+
+- `DECISION_MADE` — ML prediction completed successfully
+- `ML_FAILURE` — ML service unavailable or errored
+- `ALERT_CREATED` — fraud alert created for HOLD decision
+- `ALERT_STATE_CHANGED` — analyst changed alert status
+- `OUTCOME_RECORDED` — fraud outcome feedback recorded
+
+The audit trail is stored in the `fraud_decision_audit` table
+(PostgreSQL) with customer isolation, role-based access control,
+bounded explanation summaries, and idempotency coordination.
+The audit endpoint (`GET /api/v1/audit/transactions/{id}`) is
+protected by authentication and authorization — customers may
+only access their own audit trail.
+
+**Step 46 (production model lifecycle & version governance) is
+complete.** The ML service now activates models through an
+integrity-verified registry:
+
+- A model manifest (`ml/models/model_manifest.json`) records the
+  active version, artifact filename, SHA-256 checksum, feature
+  schema version, and creation timestamp.
+- Startup activation enforces: manifest presence → artifact
+  checksum verification → bundle load → interface validation
+  (`predict_proba`) → feature compatibility validation → ACTIVE.
+- Any failure leaves the service in `model_unavailable` state;
+  no unverified model is ever loaded.
+- The authoritative model identity (name, version, checksum,
+  schema) is exposed consistently via `/health`, `/ready`,
+  `/metrics`, prediction responses, and audit records.
+- Configuration-based rollback re-validates the target before
+  switching; a failed candidate never destroys a working model.
+- Model artifacts remain file/manifest-based (no new DB tables)
+  and must originate from a trusted training pipeline (joblib
+  uses pickle, which can execute code on load).
+
+**Step 47 (fraud model evaluation, calibration & threshold governance)
+is complete.** Offline evaluation of the verified model is available
+through `python -m ml.evaluation.runner`:
+
+- Classification metrics (confusion matrix, precision, recall, F1,
+  FPR/FNR, prevalence), ranking metrics (ROC-AUC, PR-AUC), and
+  calibration (Brier score, reliability bins) computed on the held-out
+  temporal test split from the approved dataset source.
+- Deterministic threshold sweep plus four recommendation strategies
+  (max F1, minimum business cost, minimum recall, minimum precision),
+  each labelled **EVALUATION / RECOMMENDATION ONLY**.
+- `EVAL_*` environment variables configure evaluation only — they can
+  never change the production threshold, risk aggregation, or the
+  active model. Applying a recommended threshold requires a new
+  artifact + manifest through the Step 46 governance pipeline.
+- No evaluation API endpoint exists; no client-controlled surface.
+  Monitoring counters, audit records, `/predict`, `/health`, and
+  `/ready` are unchanged by evaluation (verified end-to-end in
+  `ml/tests/e2e_step47_evaluation.py`).
+- Full documentation: `docs/ml-architecture.md` (Offline Evaluation,
+  Step 47) and `.env.example` (`EVAL_*` section).
+
+**Step 48 (automated model validation & promotion gate) is complete.**
+An offline, production-safe promotion gate compares a candidate fraud
+model against the current production model and answers `APPROVED` or
+`REJECTED`:
+
+- The candidate is validated through the full Step 46 governance
+  sequence (manifest → SHA-256 checksum → bundle load → interface →
+  feature-schema/count compatibility) using a scratch registry — the
+  candidate is never activated as, or swapped into, production.
+- Both models are evaluated on the same held-out dataset through the
+  Step 47 framework (`build_report`); each at its own bundled
+  production threshold (observed — never modified).
+- Configurable promotion policy (`PROMO_*` variables): absolute
+  minimum requirements (PR-AUC, ROC-AUC, recall, precision, F1, Brier)
+  and relative regression limits vs production (max degradation
+  fractions, max Brier increase).
+- Fail-closed: any validation gap (missing artifact, invalid checksum,
+  malformed manifest, failed evaluation, unavailable metrics, invalid
+  policy) yields `REJECTED` — never `APPROVED` with incomplete
+  validation.
+- The gate never modifies the active production manifest, artifact,
+  threshold, or runtime model. Promotion remains an explicit operator
+  action through the Step 46 governance workflow.
+- CLI: `python -m ml.evaluation.promotion_gate --candidate-model-dir <dir> [--output PATH]`.
+  Exit codes: 0 approved, 1 rejected, 2 internal error.
+- Full documentation: `docs/ml-architecture.md` (Promotion Gate, Step 48)
+  and `.env.example` (`PROMO_*` section).
+
+**Step 49 (promotion history & audit trail) is complete.**
+An append-only, production-safe audit trail persists every promotion
+gate decision for traceability and governance:
+
+- After each promotion gate run, the decision is automatically saved
+  to a structured history directory (`PROMO_HISTORY_DIR`, default
+  `ml/promotion_history/`). Each decision is stored as a bounded JSON
+  file named by timestamp.
+- Storage is bounded: max 1000 files, each < 32 KB. Oldest files are
+  automatically removed when the limit is reached.
+- History write failures are logged but do not affect the promotion
+  gate decision (fail-safe).
+- CLI: `python -m ml.evaluation.promotion_history [--history-dir DIR]`
+  lists decisions; `--decision APPROVED|REJECTED` filters by outcome;
+  `--limit N` caps output; `--summary` shows statistics.
+- History is read-only for queries — it never modifies production
+  state, the active manifest, or the production threshold.
+- Full documentation: `docs/ml-architecture.md` (Promotion History,
+  Step 49) and `.env.example` (`PROMO_HISTORY_DIR` section).
+
+**Step 50 (centralized promotion governance & approval workflow) is complete.**
+A production-safe, authenticated approval workflow sits between the
+Step 48 promotion gate and the Step 46 model activation:
+
+- Governance records track the lifecycle: `PENDING → APPROVED → PROMOTED`
+  or `PENDING → REJECTED`. Invalid transitions are rejected.
+- Only `fraud_analyst` and `admin` roles may interact with promotions;
+  customers are denied access. Actor identity always comes from the JWT.
+- API endpoints: `POST /api/v1/promotions` (create),
+  `GET /api/v1/promotions` (list), `GET /api/v1/promotions/{id}` (detail),
+  `POST .../approve`, `POST .../reject`, `POST .../mark-promoted`.
+- PostgreSQL persistence with `SELECT ... FOR UPDATE` for concurrency
+  safety. Idempotency via unique constraint on candidate version +
+  checksum + gate decision.
+- Every governance event is audited through the Step 45 audit trail
+  (`PROMOTION_CREATED`, `PROMOTION_APPROVED`, `PROMOTION_REJECTED`,
+  `PROMOTION_MARKED_PROMOTED`).
+- Approval does NOT activate the model. The `PROMOTED` status only
+  records that the operator confirmed Step 46 activation. Production
+  model, manifest, and threshold are never modified by governance.
+- Full documentation: `docs/ml-architecture.md` (Promotion Governance,
+  Step 50) and `docs/api-contract.md` (Promotion Endpoints).
+
+**Step 51 (promotion activation safety & verification gate) is complete.**
+A production-safe verification layer between Step 50 governance
+approval and Step 46 model activation:
+
+- Verifies all preconditions before activation: governance APPROVED,
+  candidate identity complete, artifact exists, checksum matches,
+  schema compatible, production baseline unchanged, gate decision
+  APPROVED, activation not already consumed.
+- Issues a short-lived, HMAC-signed activation token (5-minute
+  lifetime, scoped to one promotion, single-use).
+- Token consumption prevents replay and records the activation in
+  the governance record and audit trail.
+- API endpoints: `POST .../activation-verify` (verify + issue token),
+  `POST .../activate` (consume token + mark activated).
+- Production baseline protection: if production has changed since
+  governance approval, verification fails and requires a new
+  governance decision.
+- Fail-closed: any verification failure blocks activation. No
+  automatic activation occurs.
+- Full documentation: `docs/ml-architecture.md` (Activation
+  Verification, Step 51).
+
+**Step 52 (final activation safety hardening) is complete.**
+Hardens the two genuine limitations from Step 51:
+
+- **Fail-closed artifact verification**: candidate artifact
+  existence is never assumed True. The `ArtifactVerifier` protocol
+  provides pluggable verification — the default implementation
+  reuses the Step 46 integrity module for independent checksum,
+  schema, and existence checks. If verification cannot be performed,
+  activation is BLOCKED.
+- **Persistent restart-safe token consumption**: the governance
+  record's `activation_status` is the authoritative source.
+  Consumed tokens remain rejected after process/backend/worker
+  restart. Atomic compare-and-set (CAS) transitions ensure exactly
+  one successful consumer under concurrency.
+- No new automatic activation or runtime hot-swap introduced.
+  Step 51 remains a safety gate; Step 46 remains the explicit
+  activation mechanism.

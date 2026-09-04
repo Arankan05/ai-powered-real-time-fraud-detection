@@ -607,6 +607,7 @@ class TestBackendContract:
 
         # Build TransactionResponse as the backend router would
         response = TransactionResponse(
+            transaction_id="test-txn-id",
             amount=1500.00,
             currency="USD",
             merchant_name="Test",

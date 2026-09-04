@@ -38,11 +38,26 @@ from fastapi import FastAPI
 from backend.config import get_settings
 from backend.db.alert_repository import SQLiteAlertRepository
 from backend.db.user_repository import SQLiteUserRepository
-from backend.routers.alerts import router as alerts_router, set_alert_repository
+from backend.routers.alerts import (
+    router as alerts_router,
+    set_alert_repository,
+    set_audit_repository as set_alerts_audit_repo,
+)
+from backend.routers.audit import (
+    router as audit_router,
+    set_audit_repository as set_audit_router_repo,
+)
 from backend.routers.auth import router as auth_router
+from backend.routers.promotions import (
+    router as promotions_router,
+    set_governance_repository,
+    set_audit_repository as set_promo_audit_repo,
+)
 from backend.routers.transactions import (
     router as transactions_router,
     set_alert_repository as set_txn_alert_repo,
+    set_audit_repository as set_txn_audit_repo,
+    set_idempotency_store as set_txn_idempotency_store,
     set_ml_client,
 )
 from backend.security.deps import set_user_repository
@@ -78,6 +93,27 @@ def _init_sqlite() -> None:
     except Exception as exc:
         logger.warning("SQLite user store unavailable (%s); authentication disabled", exc)
 
+    # Step 44: idempotency store — in-memory for SQLite mode
+    from backend.db.idempotency_store import InMemoryIdempotencyStore
+    _idempotency = InMemoryIdempotencyStore()
+    set_txn_idempotency_store(_idempotency)
+    logger.info("Idempotency store: in-memory")
+
+    # Step 45: audit store — in-memory for SQLite mode
+    from backend.db.audit_repository import InMemoryAuditStore
+    _audit_store = InMemoryAuditStore()
+    set_txn_audit_repo(_audit_store)
+    set_alerts_audit_repo(_audit_store)
+    set_audit_router_repo(_audit_store)
+    set_promo_audit_repo(_audit_store)
+    logger.info("Audit store: in-memory")
+
+    # Step 50: promotion governance — in-memory for SQLite mode
+    from backend.db.promotion_governance import InMemoryPromotionGovernanceStore
+    _governance_store = InMemoryPromotionGovernanceStore()
+    set_governance_repository(_governance_store)
+    logger.info("Promotion governance: in-memory")
+
 
 def _init_postgres() -> None:
     """Set up the PostgreSQL-backed repositories (fail-fast).
@@ -112,6 +148,25 @@ def _init_postgres() -> None:
     set_alert_repository(_alert_repo)
     set_txn_alert_repo(_alert_repo)
     set_user_repository(_user_repo)
+
+    # Step 44: idempotency store — PostgreSQL-backed
+    from backend.db.idempotency_store import PostgresIdempotencyStore
+    _idempotency = PostgresIdempotencyStore(_pg_pool)
+    set_txn_idempotency_store(_idempotency)
+
+    # Step 45: audit repository — PostgreSQL-backed (append-only)
+    from backend.db.audit_repository import PostgresAuditRepository
+    _audit_repo_pg = PostgresAuditRepository(_pg_pool)
+    set_txn_audit_repo(_audit_repo_pg)
+    set_alerts_audit_repo(_audit_repo_pg)
+    set_audit_router_repo(_audit_repo_pg)
+    set_promo_audit_repo(_audit_repo_pg)
+
+    # Step 50: promotion governance — PostgreSQL-backed
+    from backend.db.promotion_governance import PostgresPromotionGovernanceRepository
+    _governance_repo_pg = PostgresPromotionGovernanceRepository(_pg_pool)
+    set_governance_repository(_governance_repo_pg)
+
     logger.info(
         "Persistence: PostgreSQL (host=%s port=%s db=%s)",
         settings.POSTGRES_HOST, settings.POSTGRES_PORT, settings.POSTGRES_DB,
@@ -166,3 +221,5 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(transactions_router)
 app.include_router(alerts_router)
+app.include_router(audit_router)
+app.include_router(promotions_router)

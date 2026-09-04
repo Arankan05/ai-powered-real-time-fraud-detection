@@ -31,6 +31,15 @@ class TransactionCreate(BaseModel):
     device_type: str = Field(..., pattern=r"^(mobile|desktop|pos)$")
     ip_address: str = Field(..., min_length=7, max_length=45)
 
+    # Step 44: optional client-supplied idempotency key for duplicate
+    # prevention.  Scoped to the authenticated customer; the server
+    # controls the customer_id binding.
+    idempotency_key: str | None = Field(
+        None,
+        max_length=255,
+        description="Client idempotency key (prevents duplicate submissions)",
+    )
+
 
 # ── ML / Fraud Intelligence Service response ──────────────────────────
 
@@ -167,6 +176,9 @@ class TransactionResponse(BaseModel):
     Matches ``docs/api-contract.md`` POST /api/v1/transactions response.
     """
 
+    # Step 44: server-generated transaction identifier
+    transaction_id: str
+
     amount: float
     currency: str
     merchant_name: str
@@ -197,6 +209,14 @@ class TransactionResponse(BaseModel):
 
     # Alert reference (populated when decision == HOLD)
     alert: AlertSummary | None = None
+
+    # Step 44: idempotency metadata
+    idempotent: bool = False
+
+    # Step 44: ML failure indicator — present when ML service was
+    # unavailable or returned an error.  When ``True``, no ML
+    # prediction fields are populated and no fraud decision was made.
+    ml_failure: bool = False
 
 
 # ── Outcome feedback ──────────────────────────────────────────────────
@@ -304,3 +324,142 @@ class MeResponse(BaseModel):
     customer_id: str | None = None
     is_active: bool
     created_at: str
+
+
+# ── Audit trail (Step 45) ────────────────────────────────────────────
+
+
+class AuditEventResponse(BaseModel):
+    """Single audit event in a transaction's audit trail."""
+
+    audit_id: str
+    transaction_id: str
+    customer_id: str
+    event_type: str
+    decision: str | None = None
+    risk_score: int | None = None
+    risk_level: str | None = None
+    fraud_probability: float | None = None
+    model_version: str | None = None
+    explanation_summary: dict[str, Any] | None = None
+    rule_signal_summary: dict[str, Any] | None = None
+    failure_category: str | None = None
+    actor_id: str | None = None
+    actor_role: str | None = None
+    previous_state: str | None = None
+    new_state: str | None = None
+    alert_id: str | None = None
+    created_at: str
+
+
+class AuditTrailResponse(BaseModel):
+    """Complete audit trail for a transaction."""
+
+    transaction_id: str
+    events: list[AuditEventResponse]
+
+
+# ── Promotion Governance (Step 50) ───────────────────────────────────
+
+
+class PromotionCreateRequest(BaseModel):
+    """``POST /api/v1/promotions`` request — create from gate decision."""
+
+    gate_decision: str = Field(
+        ..., pattern=r"^(APPROVED|REJECTED)$",
+        description="Gate decision: APPROVED or REJECTED",
+    )
+    candidate_model_name: str = Field(..., min_length=1, max_length=100)
+    candidate_model_version: str = Field(..., min_length=1, max_length=100)
+    candidate_checksum: str = Field(..., min_length=1, max_length=128)
+    candidate_schema_version: str = Field(..., min_length=1, max_length=20)
+    candidate_n_features: int = Field(..., ge=1)
+    production_model_name: str = Field(..., min_length=1, max_length=100)
+    production_model_version: str = Field(..., min_length=1, max_length=100)
+    production_checksum: str = Field(..., min_length=1, max_length=128)
+    production_schema_version: str = Field(..., min_length=1, max_length=20)
+    production_n_features: int = Field(..., ge=1)
+    gate_report: dict[str, Any] | None = Field(
+        None, description="Bounded gate report (no raw data)",
+    )
+
+
+class PromotionResponse(BaseModel):
+    """Single promotion governance record."""
+
+    promotion_id: str
+    gate_decision: str
+    governance_status: str
+    candidate_model_name: str
+    candidate_model_version: str
+    candidate_checksum: str
+    candidate_schema_version: str
+    candidate_n_features: int
+    production_model_name: str
+    production_model_version: str
+    production_checksum: str
+    production_schema_version: str
+    production_n_features: int
+    reviewer_id: str | None = None
+    reviewer_role: str | None = None
+    reviewed_at: str | None = None
+    approval_comment: str | None = None
+    rejection_reason: str | None = None
+    execution_status: str | None = None
+    promoted_by: str | None = None
+    promoted_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class PromotionListResponse(BaseModel):
+    """Paginated list of promotion governance records."""
+
+    items: list[PromotionResponse]
+    total: int
+    page: int
+    per_page: int
+
+
+class PromotionApproveRequest(BaseModel):
+    """``POST /api/v1/promotions/{id}/approve`` request."""
+
+    comment: str | None = Field(
+        None, max_length=500,
+        description="Optional approval comment",
+    )
+
+
+class PromotionRejectRequest(BaseModel):
+    """``POST /api/v1/promotions/{id}/reject`` request."""
+
+    reason: str | None = Field(
+        None, max_length=500,
+        description="Rejection reason",
+    )
+
+
+# ── Activation Verification (Step 51) ────────────────────────────────
+
+
+class ActivationVerifyResponse(BaseModel):
+    """Response from activation verification."""
+
+    status: str = Field(
+        ..., description="READY_FOR_ACTIVATION or ACTIVATION_BLOCKED",
+    )
+    promotion_id: str
+    candidate_identity: dict[str, Any]
+    production_identity: dict[str, Any]
+    reasons: list[str] | None = None
+    activation_token: str | None = None
+    token_expires_at: str | None = None
+
+
+class ActivationConsumeRequest(BaseModel):
+    """``POST /api/v1/promotions/{id}/activate`` request."""
+
+    activation_token: str = Field(
+        ..., min_length=1, max_length=2000,
+        description="Short-lived activation token from verification",
+    )

@@ -145,6 +145,44 @@ CREATE TABLE IF NOT EXISTS alerts (
     # Default ``ORDER BY created_at DESC`` in ``list_alerts`` — the index
     # avoids a filesort on every page fetch.
     "CREATE INDEX IF NOT EXISTS ix_alerts_created_at ON alerts (created_at DESC)",
+
+    # ── promotion_governance (Step 50) ─────────────────────────────
+    """\
+CREATE TABLE IF NOT EXISTS promotion_governance (
+    promotion_id               UUID PRIMARY KEY,
+    gate_decision              VARCHAR(10) NOT NULL
+                               CHECK (gate_decision IN ('APPROVED', 'REJECTED')),
+    governance_status          VARCHAR(10) NOT NULL DEFAULT 'PENDING'
+                               CHECK (governance_status IN (
+                                   'PENDING', 'APPROVED', 'REJECTED', 'PROMOTED')),
+    candidate_model_name       VARCHAR(100) NOT NULL,
+    candidate_model_version    VARCHAR(100) NOT NULL,
+    candidate_checksum         VARCHAR(128) NOT NULL,
+    candidate_schema_version   VARCHAR(20) NOT NULL,
+    candidate_n_features       INTEGER NOT NULL,
+    production_model_name      VARCHAR(100) NOT NULL,
+    production_model_version   VARCHAR(100) NOT NULL,
+    production_checksum        VARCHAR(128) NOT NULL,
+    production_schema_version  VARCHAR(20) NOT NULL,
+    production_n_features      INTEGER NOT NULL,
+    gate_report                JSONB,
+    reviewer_id                UUID,
+    reviewer_role              VARCHAR(20),
+    reviewed_at                TIMESTAMPTZ,
+    approval_comment           VARCHAR(500),
+    rejection_reason           VARCHAR(500),
+    execution_status           VARCHAR(50),
+    promoted_by                UUID,
+    promoted_at                TIMESTAMPTZ,
+    created_at                 TIMESTAMPTZ NOT NULL,
+    updated_at                 TIMESTAMPTZ NOT NULL
+)""",
+    "CREATE INDEX IF NOT EXISTS ix_promo_gov_status ON promotion_governance (governance_status)",
+    "CREATE INDEX IF NOT EXISTS ix_promo_gov_candidate ON promotion_governance (candidate_model_version, candidate_checksum)",
+    "CREATE INDEX IF NOT EXISTS ix_promo_gov_created_at ON promotion_governance (created_at DESC)",
+    """\
+CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_gov_candidate_decision
+    ON promotion_governance (candidate_model_version, candidate_checksum, gate_decision)""",
 )
 
 

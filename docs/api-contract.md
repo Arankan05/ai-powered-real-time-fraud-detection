@@ -767,6 +767,75 @@ Role escalation through the public API is impossible: registration
 * History store uses `threading.Lock` for thread-safe concurrent access.
 * Global exception handler catches unhandled errors without leaking internals.
 
+### ML monitoring and observability (Step 43)
+
+**Monitoring endpoint** (ML service on port 8001):
+
+| Endpoint | Purpose | Auth |
+|----------|---------|------|
+| `GET /metrics` | Aggregate prediction metrics snapshot | Internal (behind backend trust boundary) |
+
+**Metrics response** (`GET /metrics`):
+
+```json
+{
+  "total_requests": 42,
+  "successful_predictions": 40,
+  "failed_predictions": 2,
+  "error_rate": 0.0476,
+  "fraud_count": 5,
+  "non_fraud_count": 35,
+  "slow_predictions": 0,
+  "decisions": {"APPROVE": 30, "VERIFY": 7, "HOLD": 3},
+  "risk_levels": {"LOW": 28, "MEDIUM": 8, "HIGH": 4},
+  "errors": {"validation": 1, "feature_engineering": 1, ...},
+  "model_version": "fraud-xgb-v1.0.0",
+  "model_identity": {
+    "model_name": "fraud-xgb",
+    "model_version": "fraud-xgb-v1.0.0",
+    "artifact_checksum": "f12d0d2e8702...",
+    "feature_schema_version": "1.0.0",
+    "n_features": 24,
+    "status": "active"
+  },
+  "latency": {
+    "count": 40, "mean_seconds": 0.085,
+    "p50_seconds": 0.072, "p95_seconds": 0.198, "p99_seconds": 0.310
+  },
+  "drift": {"baseline_configured": false, "message": "No baseline configured."},
+  "config": {"latency_warn_seconds": 5.0, ...}
+}
+```
+
+**What is tracked:**
+
+* Request counts (total, success, failure)
+* Prediction latency (mean, p50, p95, p99, min, max)
+* Error distribution by bounded category
+* Fraud/non-fraud counts
+* Decision and risk-level distribution
+* Model version
+* Model identity (Step 46): active model name, version, artifact checksum, feature schema version
+* Drift signals (when baseline is configured)
+
+**What is NOT tracked:**
+
+* Raw transaction payloads, customer IDs, merchant names
+* Passwords, JWT tokens, authorization headers, filesystem paths
+
+**Drift monitoring:**
+
+* Optional baseline via `ML_BASELINE_*` environment variables
+* Mean/std comparison with configurable threshold (`ML_DRIFT_STD_MULTIPLIER`)
+* Drift is purely observational — never changes predictions or decisions
+* Without baseline, drift monitoring reports "not configured"
+
+**Process-local limitation:**
+
+Metrics are process-local (in-memory). Multi-process deployments would
+report per-process metrics. Global aggregation requires an external
+metrics collector (e.g., Prometheus).
+
 ### Configuration
 
 See `.env.example`. Key variables: `BACKEND_SECRET_KEY` (JWT signing
@@ -784,3 +853,150 @@ python -m backend.db.seed_users
 
 (seeds `analyst@example.com` / `admin@example.com` with generated or
 `SEED_*`-environment-supplied passwords; idempotent).
+
+---
+
+## Implementation Notes — Production Decision Pipeline (Step 44)
+
+### Idempotent Transaction Processing
+
+`POST /api/v1/transactions` supports an optional `Idempotency-Key`
+request header to prevent duplicate transaction submissions.
+
+**Idempotency scope:**
+
+* Scoped to the authenticated customer (server-derived `customer_id`)
+* Different customers using the same key create independent transactions
+* Same customer using different keys creates independent transactions
+
+**Behavior:**
+
+| Scenario | Behavior |
+|---|---|
+| No idempotency key | Transaction proceeds normally (no deduplication) |
+| New key | Transaction proceeds; result cached in idempotency store |
+| Same key (completed) | Returns cached result with HTTP 200 (`idempotent: true`) |
+| Same key (processing) | Returns HTTP 409 Conflict |
+| Same key (previous failure) | Retries the ML call |
+
+**Key validation:**
+
+* Max 255 characters
+* Whitespace-only keys rejected (422)
+* Control characters rejected (422)
+
+**Response additions:**
+
+| Field | Type | Description |
+|---|---|---|
+| `transaction_id` | string (UUID) | Server-generated transaction identifier |
+| `idempotent` | boolean | `true` when response was replayed from cache |
+| `ml_failure` | boolean | `true` when ML service was unavailable |
+
+### ML Failure Policy
+
+When the ML service is unavailable or times out:
+
+* HTTP 503 (or 502 for generic errors) is returned
+* No fraud predictions are fabricated
+* No SHAP explanations are fabricated
+* No misleading model-version data is included
+* Idempotency records are marked "failed" (allowing future retry)
+* No alerts are created for failed transactions
+
+### Decision Consistency
+
+The response and persisted alert always represent the SAME decision:
+
+* `risk_score`, `risk_level`, `decision`, `model_version` match
+  between API response and alert record
+* Duplicate requests via idempotency key return the identical cached
+  response
+* No duplicate alerts are created for the same transaction
+
+### Retry Policy
+
+* No automatic retry loops around the ML service
+* Clients may retry with the same idempotency key after ML failure
+* Idempotency records marked "failed" allow fresh ML attempts
+
+### Known Limitations
+
+* Idempotency records are process-local (in-memory) when using the
+  SQLite persistence backend; PostgreSQL mode uses database-backed
+  idempotency with race-condition protection via UNIQUE constraints
+* Idempotency records have no automatic TTL (manual cleanup required)
+
+---
+
+## Audit Trail Endpoints (Step 45)
+
+### GET /api/v1/audit/transactions/{transaction_id}
+
+Retrieve the complete fraud decision audit trail for a transaction.
+
+**Authentication:** Required (Bearer token).
+
+**Authorization:**
+- `fraud_analyst` / `admin`: full access to any transaction's audit trail.
+- `customer`: may only access their own audit trail (customer_id derived from JWT).
+
+**Response** `200 OK`:
+
+```json
+{
+  "transaction_id": "uuid",
+  "events": [
+    {
+      "audit_id": "uuid",
+      "transaction_id": "uuid",
+      "customer_id": "uuid",
+      "event_type": "DECISION_MADE",
+      "decision": "HOLD",
+      "risk_score": 75,
+      "risk_level": "HIGH",
+      "fraud_probability": 0.85,
+      "model_version": "xgb-v2.1.0",
+      "explanation_summary": {...},
+      "rule_signal_summary": {...},
+      "failure_category": null,
+      "actor_id": null,
+      "actor_role": null,
+      "previous_state": null,
+      "new_state": null,
+      "alert_id": null,
+      "created_at": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Event types:**
+| `event_type` | Description |
+|---|---|
+| `DECISION_MADE` | ML prediction completed successfully |
+| `ML_FAILURE` | ML service was unavailable or errored |
+| `ALERT_CREATED` | Fraud alert created for HOLD decision |
+| `ALERT_STATE_CHANGED` | Analyst changed alert status |
+| `OUTCOME_RECORDED` | Fraud outcome feedback recorded |
+
+**Error responses:**
+| Status | Condition |
+|---|---|
+| `401` | Missing or invalid authentication |
+| `403` | Customer accessing another customer's audit trail |
+| `404` | No audit events found (analyst/admin only) |
+
+**Security properties:**
+- Customer isolation enforced from JWT, not request body
+- No secrets, passwords, JWTs, or raw transaction payloads in response
+- Bounded explanation summaries (max 5 factors, max 200 char strings)
+- Append-only: no PUT/PATCH/DELETE endpoints exist
+- Idempotent replays do not duplicate DECISION_MADE audit events
+
+### Known Limitations (Audit)
+
+* Audit events are append-only; no mechanism to delete or modify old events
+* In-memory audit store is used for SQLite mode (volatile)
+* Outcome feedback uses a deterministic placeholder transaction_id
+* No automatic TTL or retention policy on audit records

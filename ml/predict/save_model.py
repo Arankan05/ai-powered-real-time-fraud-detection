@@ -4,6 +4,9 @@ Reuses the exact tuning configuration from ``ml.models.tune_xgboost``
 (best config: max_depth=4, lr=0.05, n_estimators=500, threshold=0.50)
 and serialises the complete model bundle via :func:`save_bundle`.
 
+Step 46: After saving the bundle, a model manifest (``model_manifest.json``)
+is generated with SHA-256 checksum, feature schema, and version metadata.
+
 Usage::
 
     python -m ml.predict.save_model
@@ -155,6 +158,23 @@ def main() -> None:
     print(f"  Features: {bundle.n_features}")
     print()
 
+    # ── Generate manifest (Step 46) ─────────────────────────────────
+    print("Step 4b — Generating model manifest...")
+    from ml.predict.integrity import build_manifest, save_manifest
+
+    manifest = build_manifest(
+        model_name="fraud-xgb",
+        model_version=bundle.model_version,
+        artifact_path=saved_path,
+        n_features=bundle.n_features,
+        threshold=bundle.threshold,
+    )
+    manifest_path = save_manifest(manifest)
+    print(f"  Manifest: {manifest_path}")
+    print(f"  Checksum: {manifest.artifact_checksum[:12]}...")
+    print(f"  Schema:   {manifest.feature_schema_version}")
+    print()
+
     # ── Verify round-trip ────────────────────────────────────────────
     from ml.predict.bundle import load_bundle
     loaded = load_bundle(saved_path)
@@ -162,6 +182,14 @@ def main() -> None:
     assert loaded.threshold == bundle.threshold
     assert loaded.feature_names == bundle.feature_names
     print("  Round-trip verification: PASSED")
+
+    # Verify manifest integrity
+    from ml.predict.integrity import verify_artifact, load_manifest
+    loaded_manifest = load_manifest()
+    verify_artifact(loaded_manifest)
+    print(f"  Manifest integrity: VERIFIED")
+    print(f"  Active version: {loaded_manifest.model_version}")
+    print(f"  Checksum: {loaded_manifest.artifact_checksum[:12]}...")
 
     print("\nDone.")
 

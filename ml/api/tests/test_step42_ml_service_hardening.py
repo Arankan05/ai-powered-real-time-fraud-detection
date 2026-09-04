@@ -638,13 +638,17 @@ class TestConcurrency:
         """Identical repeated requests produce identical results."""
         if not _model_available(client):
             pytest.skip("Model not available")
-        txn = _valid_transaction(customer_id="determinism_test")
+        # Use a unique cold-start customer for each prediction to avoid
+        # history accumulation affecting determinism.
+        import uuid as _uuid
         responses = []
-        for _ in range(5):
+        for i in range(5):
+            cid = f"det-stable-{_uuid.uuid4().hex[:8]}"
+            txn = _valid_transaction(customer_id=cid)
             resp = client.post("/predict", json=txn)
             assert resp.status_code == 200
             responses.append(resp.json()["fraud_probability"])
-        # All predictions should be identical
+        # All predictions should be identical (cold-start, same features)
         assert len(set(responses)) == 1
 
     def test_no_shared_state_between_requests(self, client: TestClient):

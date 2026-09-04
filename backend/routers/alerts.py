@@ -19,6 +19,7 @@ from backend.db.alert_repository import (
     VALID_STATUSES,
     AlertRepository,
 )
+from backend.db.audit_repository import ALERT_STATE_CHANGED
 from backend.schemas import (
     AlertListResponse,
     AlertResponse,
@@ -39,11 +40,20 @@ _require_analyst = require_roles("fraud_analyst", "admin")
 # Module-level repository — set at app startup
 _alert_repo: AlertRepository | None = None
 
+# Step 45: audit repository — set at app startup
+_audit_repo = None
+
 
 def set_alert_repository(repo: AlertRepository) -> None:
     """Set the alert repository (called during app startup)."""
     global _alert_repo
     _alert_repo = repo
+
+
+def set_audit_repository(repo: Any) -> None:
+    """Set the audit repository (called during app startup)."""
+    global _audit_repo
+    _audit_repo = repo
 
 
 def get_alert_repository() -> AlertRepository:
@@ -218,6 +228,14 @@ def update_alert(
                 detail=f"Invalid status transition from "
                 f"'{existing['status']}' to '{request.status}'.",
             )
+        # Step 45: audit the state transition
+        _audit_state_change(
+            alert=updated,
+            previous_state=updated.get("_previous_status"),
+            new_state=request.status,
+            actor_id=current_user["id"],
+            actor_role=current_user.get("role"),
+        )
     else:
         # Only notes update — get current alert, update notes
         existing = repo.get_by_id(alert_id)
@@ -240,3 +258,38 @@ def update_alert(
             )
 
     return _alert_dict_to_response(updated)
+
+
+# ── Step 45: Audit helpers ────────────────────────────────────────────
+
+
+def _audit_state_change(
+    *,
+    alert: dict[str, Any],
+    previous_state: str | None,
+    new_state: str,
+    actor_id: str,
+    actor_role: str | None,
+) -> None:
+    """Audit an alert state transition (best-effort, never blocks)."""
+    if _audit_repo is None:
+        return
+    # Only audit actual state changes, not notes-only updates
+    if previous_state is None or previous_state == new_state:
+        return
+    try:
+        _audit_repo.create(
+            transaction_id=alert["transaction_id"],
+            customer_id=alert.get("customer_id") or "00000000-0000-4000-8000-000000000000",
+            event_type=ALERT_STATE_CHANGED,
+            decision=alert.get("decision"),
+            risk_score=alert.get("risk_score"),
+            risk_level=alert.get("risk_level"),
+            alert_id=alert["id"],
+            actor_id=actor_id,
+            actor_role=actor_role,
+            previous_state=previous_state,
+            new_state=new_state,
+        )
+    except Exception:
+        logger.warning("Failed to audit alert state change", exc_info=True)
