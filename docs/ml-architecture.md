@@ -755,6 +755,127 @@ model/promotion metadata. No raw data, secrets, or paths are stored.
   itself — it only records that it was performed.
 - No notification mechanism (email/webhook) for pending approvals.
 
+### Activation Verification (Step 51 — Pre-Activation Safety Gate)
+
+**Step 51 NEVER activates models automatically. It provides a
+verification layer and a controlled handoff to the existing Step 46
+activation process.**
+
+#### Purpose
+
+Step 51 sits between Step 50 governance approval and Step 46 model
+activation. It ensures that an authorized operator cannot accidentally
+activate a model unless all preconditions are met:
+
+1. Governance record exists and is APPROVED.
+2. Gate decision was APPROVED (Step 48).
+3. Candidate identity is complete and consistent.
+4. Candidate artifact exists and checksum matches.
+5. Feature schema is compatible.
+6. Production baseline has not changed since approval.
+7. Activation has not already been consumed.
+
+#### Activation verification flow
+
+```
+Step 48: Candidate evaluation → APPROVED/REJECTED
+Step 49: Decision history
+Step 50: Human governance approval (PENDING → APPROVED)
+Step 51: Final pre-activation verification (safety gate)
+Step 46: Actual explicit model activation
+```
+
+Step 51 is a **safety gate/handoff** — it does not introduce
+uncontrolled model deployment.
+
+#### Module architecture
+
+- `backend/db/activation_verification.py`: verification logic,
+  token signing/validation, consumption tracking.
+- `backend/db/promotion_governance.py`: extended with activation
+  status fields (NONE → TOKEN_ISSUED → CONSUMED).
+- `backend/routers/promotions.py`: two new endpoints for
+  verification and activation.
+
+#### Activation token
+
+The token is an HMAC-SHA256 signed payload containing:
+
+- `promotion_id` — scoped to one promotion.
+- `candidate_identity` — model name, version, checksum, schema.
+- `production_identity` — expected production baseline.
+- `issued_at` / `expires_at` — short-lived (5 minutes).
+- `purpose` — always `model_activation`.
+- `token_id` — unique UUID for replay prevention.
+
+Token properties:
+
+- Short-lived (default 300 seconds).
+- Scoped to one promotion — rejected for a different candidate.
+- Single-use — consumed on activation, replay rejected.
+- Rejected after expiry.
+- Rejected if production baseline changes.
+- Signing uses the existing `BACKEND_SECRET_KEY`.
+- No secrets, raw data, or artifacts in the token.
+
+#### API endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/promotions/{id}/activation-verify` | POST | Verify preconditions + issue token |
+| `/api/v1/promotions/{id}/activate` | POST | Consume token + mark activated |
+
+Both endpoints require authentication. Only `fraud_analyst` and
+`admin` roles are authorised. Customers are denied (HTTP 403).
+
+#### Security controls
+
+- **Fail-closed**: any verification failure blocks activation.
+- **Production baseline protection**: stale approvals cannot
+  activate against a changed production state.
+- **Token replay prevention**: consumed tokens tracked in-memory
+  and in the governance record.
+- **Actor identity from JWT**: never from request payload.
+- **No automatic activation**: verification returns
+  `READY_FOR_ACTIVATION` or `ACTIVATION_BLOCKED` — it never
+  activates the model.
+- **No hot-swap**: no runtime model replacement is introduced.
+- **No threshold change**: activation does not modify the fraud
+  threshold unless Step 46 separately changes it.
+
+#### Audit trail integration
+
+Activation events recorded in the Step 45 audit trail:
+
+- `ACTIVATION_VERIFICATION_PASSED` — all preconditions met.
+- `ACTIVATION_VERIFICATION_FAILED` — one or more preconditions failed.
+- `MODEL_ACTIVATED` — token consumed, activation confirmed.
+
+Audit records contain promotion ID, candidate/production identity,
+actor identity, and event timestamp. No JWTs, signing secrets,
+raw transactions, customer data, or model artifacts are stored.
+
+#### Operator workflow
+
+1. After Step 50 approval, verify activation readiness:
+   `POST /api/v1/promotions/{id}/activation-verify`.
+2. If `READY_FOR_ACTIVATION`, the response includes an activation
+   token and expiration.
+3. Perform Step 46 activation (explicit operator action).
+4. Consume the token to confirm:
+   `POST /api/v1/promotions/{id}/activate`.
+5. The governance record is updated to `CONSUMED` status.
+
+#### Known limitations
+
+- Token consumption tracking is in-memory; a service restart clears
+  the consumed token store (but the governance record's
+  `activation_status` persists).
+- No cross-service token validation (tokens are only valid within
+  the backend service).
+- No automatic artifact verification (candidate_artifact_exists
+  defaults to True unless explicitly checked by the caller).
+
 ## Data Policy
 
 - **No real banking or customer data** is used at any stage.
@@ -763,4 +884,4 @@ model/promotion metadata. No raw data, secrets, or paths are stored.
 
 ## Status
 
-Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation), and centralized promotion governance & approval workflow (Step 50: authenticated governance records, state machine, PostgreSQL persistence, concurrency safety, audit trail integration — no automatic activation, approval ≠ activation) are complete.
+Implemented. Feature engineering, model training, behaviour/rules engines, risk aggregation, explainability, monitoring, hardening, model lifecycle governance (Step 46: manifest-based integrity verification, registry activation, rollback safety), offline model evaluation with threshold governance (Step 47: metrics, threshold sweep, cost analysis, calibration, labelled recommendations — strictly evaluation-only), automated model validation & promotion gate (Step 48: offline candidate validation, configurable policy gates, fail-closed behaviour, bounded safe reports — strictly evaluation-only, no automatic activation), promotion history & audit trail (Step 49: append-only decision persistence, bounded storage, fail-safe writes, read-only queries — strictly audit-only, no production mutation), centralized promotion governance & approval workflow (Step 50: authenticated governance records, state machine, PostgreSQL persistence, concurrency safety, audit trail integration — no automatic activation, approval ≠ activation), and promotion activation safety & verification gate (Step 51: pre-activation verification, HMAC-signed activation tokens, production baseline protection, replay prevention, fail-closed safety gate — no automatic activation, no hot-swap) are complete.

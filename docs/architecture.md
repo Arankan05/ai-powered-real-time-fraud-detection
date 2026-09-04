@@ -300,3 +300,25 @@ Step 48 promotion gate and the Step 46 model activation:
   model, manifest, and threshold are never modified by governance.
 - Full documentation: `docs/ml-architecture.md` (Promotion Governance,
   Step 50) and `docs/api-contract.md` (Promotion Endpoints).
+
+**Step 51 (promotion activation safety & verification gate) is complete.**
+A production-safe verification layer between Step 50 governance
+approval and Step 46 model activation:
+
+- Verifies all preconditions before activation: governance APPROVED,
+  candidate identity complete, artifact exists, checksum matches,
+  schema compatible, production baseline unchanged, gate decision
+  APPROVED, activation not already consumed.
+- Issues a short-lived, HMAC-signed activation token (5-minute
+  lifetime, scoped to one promotion, single-use).
+- Token consumption prevents replay and records the activation in
+  the governance record and audit trail.
+- API endpoints: `POST .../activation-verify` (verify + issue token),
+  `POST .../activate` (consume token + mark activated).
+- Production baseline protection: if production has changed since
+  governance approval, verification fails and requires a new
+  governance decision.
+- Fail-closed: any verification failure blocks activation. No
+  automatic activation occurs.
+- Full documentation: `docs/ml-architecture.md` (Activation
+  Verification, Step 51).

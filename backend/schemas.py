@@ -437,3 +437,29 @@ class PromotionRejectRequest(BaseModel):
         None, max_length=500,
         description="Rejection reason",
     )
+
+
+# ── Activation Verification (Step 51) ────────────────────────────────
+
+
+class ActivationVerifyResponse(BaseModel):
+    """Response from activation verification."""
+
+    status: str = Field(
+        ..., description="READY_FOR_ACTIVATION or ACTIVATION_BLOCKED",
+    )
+    promotion_id: str
+    candidate_identity: dict[str, Any]
+    production_identity: dict[str, Any]
+    reasons: list[str] | None = None
+    activation_token: str | None = None
+    token_expires_at: str | None = None
+
+
+class ActivationConsumeRequest(BaseModel):
+    """``POST /api/v1/promotions/{id}/activate`` request."""
+
+    activation_token: str = Field(
+        ..., min_length=1, max_length=2000,
+        description="Short-lived activation token from verification",
+    )

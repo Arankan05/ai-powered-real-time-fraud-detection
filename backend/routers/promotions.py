@@ -38,6 +38,9 @@ from backend.db.promotion_governance import (
     AUDIT_PROMOTION_CREATED,
     AUDIT_PROMOTION_MARKED_PROMOTED,
     AUDIT_PROMOTION_REJECTED,
+    ACTIVATION_CONSUMED,
+    ACTIVATION_NONE,
+    ACTIVATION_TOKEN_ISSUED,
     DuplicatePromotionError,
     InvalidTransitionError,
     PromotionGovernanceRepository,
@@ -47,7 +50,22 @@ from backend.db.promotion_governance import (
     STATUS_PROMOTED,
     STATUS_REJECTED,
 )
+from backend.db.activation_verification import (
+    AUDIT_ACTIVATION_VERIFICATION_FAILED,
+    AUDIT_ACTIVATION_VERIFICATION_PASSED,
+    AUDIT_MODEL_ACTIVATED,
+    ActivationTokenExpiredError,
+    ActivationTokenReplayError,
+    ActivationVerificationError,
+    VERIFICATION_BLOCKED,
+    VERIFICATION_PASSED,
+    consume_activation_authorization,
+    issue_activation_token,
+    verify_activation_preconditions,
+)
 from backend.schemas import (
+    ActivationConsumeRequest,
+    ActivationVerifyResponse,
     PromotionApproveRequest,
     PromotionCreateRequest,
     PromotionListResponse,
@@ -420,3 +438,194 @@ async def mark_promoted(
         promotion_id, current_user["id"],
     )
     return _record_to_response(record)
+
+
+# ── Step 51: Activation Verification ─────────────────────────────────
+
+# Module-level current production identity provider (set at startup or by tests)
+_production_identity_provider = None
+
+
+def set_production_identity_provider(provider: Any) -> None:
+    """Set a callable that returns the current production model identity dict."""
+    global _production_identity_provider
+    _production_identity_provider = provider
+
+
+def _get_current_production_identity() -> dict[str, Any]:
+    """Get the current production model identity."""
+    if _production_identity_provider is not None:
+        return _production_identity_provider()
+    return {
+        "model_name": "unknown",
+        "model_version": "unknown",
+        "checksum": "unknown",
+        "schema_version": "unknown",
+        "n_features": 0,
+    }
+
+
+@router.post(
+    "/promotions/{promotion_id}/activation-verify",
+    response_model=ActivationVerifyResponse,
+)
+async def activation_verify(
+    promotion_id: str,
+    current_user: dict[str, Any] = Depends(_require_analyst),
+) -> ActivationVerifyResponse:
+    """Verify activation preconditions and issue a short-lived token.
+
+    This endpoint does NOT activate the model. It verifies that all
+    preconditions are met and, if so, returns an activation token.
+    """
+    repo = get_governance_repository()
+    record = repo.get_by_id(promotion_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Promotion governance record not found.",
+        )
+
+    current_production = _get_current_production_identity()
+
+    result = verify_activation_preconditions(
+        governance_record=record,
+        current_production_identity=current_production,
+    )
+
+    if result.status == VERIFICATION_PASSED:
+        token, expires_at = issue_activation_token(
+            promotion_id=promotion_id,
+            candidate_identity=result.candidate_identity,
+            production_identity=current_production,
+        )
+
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if hasattr(repo, "update_activation_status"):
+            repo.update_activation_status(
+                promotion_id,
+                activation_status=ACTIVATION_TOKEN_ISSUED,
+                token_issued_at=now_iso,
+                token_expires_at=expires_at,
+            )
+
+        _audit_event(
+            AUDIT_ACTIVATION_VERIFICATION_PASSED,
+            promotion_id=promotion_id,
+            actor_id=current_user["id"],
+            actor_role=current_user["role"],
+            metadata={
+                "candidate_model_version": result.candidate_identity.get("model_version"),
+            },
+        )
+
+        logger.info(
+            "Activation verification passed: id=%s by=%s",
+            promotion_id, current_user["id"],
+        )
+        return ActivationVerifyResponse(
+            status=VERIFICATION_PASSED,
+            promotion_id=promotion_id,
+            candidate_identity=result.candidate_identity,
+            production_identity=current_production,
+            activation_token=token,
+            token_expires_at=expires_at,
+        )
+    else:
+        _audit_event(
+            AUDIT_ACTIVATION_VERIFICATION_FAILED,
+            promotion_id=promotion_id,
+            actor_id=current_user["id"],
+            actor_role=current_user["role"],
+            metadata={"reasons": result.reasons},
+        )
+
+        logger.info(
+            "Activation verification blocked: id=%s by=%s reasons=%s",
+            promotion_id, current_user["id"], result.reasons,
+        )
+        return ActivationVerifyResponse(
+            status=VERIFICATION_BLOCKED,
+            promotion_id=promotion_id,
+            candidate_identity=result.candidate_identity,
+            production_identity=current_production,
+            reasons=result.reasons,
+        )
+
+
+@router.post(
+    "/promotions/{promotion_id}/activate",
+    response_model=PromotionResponse,
+)
+async def activate_promotion(
+    promotion_id: str,
+    request: ActivationConsumeRequest,
+    current_user: dict[str, Any] = Depends(_require_analyst),
+) -> PromotionResponse:
+    """Consume the activation token and mark the promotion as activated.
+
+    This endpoint does NOT perform the actual Step 46 activation.
+    It consumes the activation token and marks the governance record.
+    """
+    repo = get_governance_repository()
+    record = repo.get_by_id(promotion_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Promotion governance record not found.",
+        )
+
+    current_production = _get_current_production_identity()
+
+    try:
+        auth = consume_activation_authorization(
+            request.activation_token,
+            expected_promotion_id=promotion_id,
+            current_production_identity=current_production,
+        )
+    except ActivationTokenExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Activation token has expired.",
+        )
+    except ActivationTokenReplayError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Activation token has already been consumed.",
+        )
+    except ActivationVerificationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
+
+    from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if hasattr(repo, "update_activation_status"):
+        repo.update_activation_status(
+            promotion_id,
+            activation_status=ACTIVATION_CONSUMED,
+            consumed_at=now_iso,
+            actor_id=current_user["id"],
+        )
+
+    _audit_event(
+        AUDIT_MODEL_ACTIVATED,
+        promotion_id=promotion_id,
+        actor_id=current_user["id"],
+        actor_role=current_user["role"],
+        previous_status=STATUS_APPROVED,
+        new_status=STATUS_PROMOTED,
+        metadata={
+            "candidate_model_version": auth.candidate_identity.get("model_version"),
+        },
+    )
+
+    logger.info(
+        "Activation token consumed: id=%s by=%s",
+        promotion_id, current_user["id"],
+    )
+
+    updated = repo.get_by_id(promotion_id)
+    return _record_to_response(updated)

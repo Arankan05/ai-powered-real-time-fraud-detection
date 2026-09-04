@@ -63,6 +63,9 @@ __all__ = [
     "AUDIT_PROMOTION_APPROVED",
     "AUDIT_PROMOTION_REJECTED",
     "AUDIT_PROMOTION_MARKED_PROMOTED",
+    "ACTIVATION_NONE",
+    "ACTIVATION_TOKEN_ISSUED",
+    "ACTIVATION_CONSUMED",
     "MAX_COMMENT_LENGTH",
     "PromotionGovernanceRepository",
     "InMemoryPromotionGovernanceStore",
@@ -102,6 +105,12 @@ AUDIT_PROMOTION_CREATED = "PROMOTION_CREATED"
 AUDIT_PROMOTION_APPROVED = "PROMOTION_APPROVED"
 AUDIT_PROMOTION_REJECTED = "PROMOTION_REJECTED"
 AUDIT_PROMOTION_MARKED_PROMOTED = "PROMOTION_MARKED_PROMOTED"
+
+# ── Activation status constants (Step 51) ─────────────────────────────
+
+ACTIVATION_NONE = "NONE"
+ACTIVATION_TOKEN_ISSUED = "TOKEN_ISSUED"
+ACTIVATION_CONSUMED = "CONSUMED"
 
 # ── Bounding constants ────────────────────────────────────────────────
 
@@ -280,6 +289,11 @@ class InMemoryPromotionGovernanceStore:
                 "execution_status": None,
                 "promoted_by": None,
                 "promoted_at": None,
+                "activation_status": ACTIVATION_NONE,
+                "activation_token_issued_at": None,
+                "activation_token_expires_at": None,
+                "activation_consumed_at": None,
+                "activation_actor_id": None,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -391,6 +405,33 @@ class InMemoryPromotionGovernanceStore:
         with self._lock:
             self._records.clear()
 
+    def update_activation_status(
+        self,
+        promotion_id: str,
+        *,
+        activation_status: str,
+        token_issued_at: str | None = None,
+        token_expires_at: str | None = None,
+        consumed_at: str | None = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Update the activation status of a governance record."""
+        with self._lock:
+            rec = self._records.get(promotion_id)
+            if rec is None:
+                raise PromotionNotFoundError(f"Promotion {promotion_id} not found")
+            rec["activation_status"] = activation_status
+            if token_issued_at is not None:
+                rec["activation_token_issued_at"] = token_issued_at
+            if token_expires_at is not None:
+                rec["activation_token_expires_at"] = token_expires_at
+            if consumed_at is not None:
+                rec["activation_consumed_at"] = consumed_at
+            if actor_id is not None:
+                rec["activation_actor_id"] = actor_id
+            rec["updated_at"] = _now_iso()
+            return dict(rec)
+
 
 # ── PostgreSQL implementation ────────────────────────────────────────
 
@@ -430,6 +471,13 @@ CREATE TABLE IF NOT EXISTS promotion_governance (
     execution_status           VARCHAR(50),
     promoted_by                UUID,
     promoted_at                TIMESTAMPTZ,
+    activation_status          VARCHAR(20) NOT NULL DEFAULT 'NONE'
+                               CHECK (activation_status IN (
+                                   'NONE', 'TOKEN_ISSUED', 'CONSUMED')),
+    activation_token_issued_at TIMESTAMPTZ,
+    activation_token_expires_at TIMESTAMPTZ,
+    activation_consumed_at     TIMESTAMPTZ,
+    activation_actor_id        UUID,
     created_at                 TIMESTAMPTZ NOT NULL,
     updated_at                 TIMESTAMPTZ NOT NULL
 )""",
@@ -548,6 +596,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_gov_candidate_decision
             "execution_status": None,
             "promoted_by": None,
             "promoted_at": None,
+            "activation_status": ACTIVATION_NONE,
+            "activation_token_issued_at": None,
+            "activation_token_expires_at": None,
+            "activation_consumed_at": None,
+            "activation_actor_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -728,15 +781,65 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_gov_candidate_decision
 
         return self._row_to_dict(updated) if updated else None
 
+    def update_activation_status(
+        self,
+        promotion_id: str,
+        *,
+        activation_status: str,
+        token_issued_at: str | None = None,
+        token_expires_at: str | None = None,
+        consumed_at: str | None = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Update the activation status of a governance record."""
+        pid = _coerce_uuid(promotion_id)
+        if pid is None:
+            raise PromotionNotFoundError(f"Invalid promotion ID: {promotion_id}")
+
+        now = _now_iso()
+        actor_uuid = _coerce_uuid(actor_id) if actor_id else None
+
+        updates: dict[str, Any] = {
+            "activation_status": activation_status,
+            "updated_at": now,
+        }
+        if token_issued_at is not None:
+            updates["activation_token_issued_at"] = token_issued_at
+        if token_expires_at is not None:
+            updates["activation_token_expires_at"] = token_expires_at
+        if consumed_at is not None:
+            updates["activation_consumed_at"] = consumed_at
+        if actor_uuid is not None:
+            updates["activation_actor_id"] = actor_uuid
+
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                set_clause = ", ".join(f"{k} = %({k})s" for k in updates)
+                updates["promotion_id"] = pid
+                cur.execute(
+                    f"UPDATE promotion_governance SET {set_clause} WHERE promotion_id = %(promotion_id)s",
+                    updates,
+                )
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT * FROM promotion_governance WHERE promotion_id = %s",
+                    (pid,),
+                )
+                updated = cur.fetchone()
+
+        return self._row_to_dict(updated) if updated else None
+
     @staticmethod
     def _row_to_dict(d: dict[str, Any]) -> dict[str, Any]:
         """Convert psycopg dict_row to the standard governance dict shape."""
         result = dict(d)
-        for field in ("promotion_id", "reviewer_id", "promoted_by"):
+        for field in ("promotion_id", "reviewer_id", "promoted_by", "activation_actor_id"):
             v = result.get(field)
             if v is not None:
                 result[field] = str(v)
-        for field in ("created_at", "updated_at", "reviewed_at", "promoted_at"):
+        for field in ("created_at", "updated_at", "reviewed_at", "promoted_at",
+                      "activation_token_issued_at", "activation_token_expires_at",
+                      "activation_consumed_at"):
             v = result.get(field)
             if v is not None and hasattr(v, "isoformat"):
                 result[field] = v.isoformat()
