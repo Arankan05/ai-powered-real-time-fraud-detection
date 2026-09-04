@@ -26,7 +26,6 @@ Run locally::
 
     uvicorn backend._main:app --host 0.0.0.0 --port 8000
 """
-
 from __future__ import annotations
 
 import logging
@@ -34,6 +33,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import get_settings
 from backend.db.alert_repository import SQLiteAlertRepository
@@ -77,7 +77,7 @@ _pg_pool = None  # set when PERSISTENCE_BACKEND=postgres
 
 def _init_sqlite() -> None:
     """Set up the lightweight SQLite-backed repositories."""
-    global _alert_repo, _user_repo
+    global _alert_repo, _user_repo, _transaction_repo
     try:
         repo = SQLiteAlertRepository(db_path=settings.ALERT_DB_PATH)
         _alert_repo = repo
@@ -94,6 +94,12 @@ def _init_sqlite() -> None:
         logger.info("User store: SQLite (%s)", settings.USER_DB_PATH)
     except Exception as exc:
         logger.warning("SQLite user store unavailable (%s); authentication disabled", exc)
+
+    # Transaction store — in-memory for SQLite mode
+    from backend.db.transaction_repository import InMemoryTransactionStore
+    _transaction_repo = InMemoryTransactionStore()
+    set_txn_transaction_repo(_transaction_repo)
+    logger.info("Transaction store: in-memory")
 
     # Step 44: idempotency store — in-memory for SQLite mode
     from backend.db.idempotency_store import InMemoryIdempotencyStore
@@ -254,6 +260,14 @@ app = FastAPI(
     description="Backend for the AI-Powered Fraud Detection System.",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth_router)

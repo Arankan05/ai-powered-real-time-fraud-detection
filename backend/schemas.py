@@ -170,6 +170,31 @@ class AlertListResponse(BaseModel):
 # ── Transaction response ──────────────────────────────────────────────
 
 
+class TransactionListItem(BaseModel):
+    """Summary item for GET /api/v1/transactions list response."""
+
+    id: str
+    customer_id: str | None = None
+    merchant_name: str | None = "N/A"
+    amount: float
+    currency: str
+    transaction_type: str
+    timestamp: str
+    status: str
+    risk_score: int | None = None
+    risk_level: str | None = None
+    decision: str | None = None
+
+
+class TransactionListResponse(BaseModel):
+    """Paginated list response for GET /api/v1/transactions."""
+
+    items: list[TransactionListItem]
+    total: int
+    page: int
+    per_page: int
+
+
 class TransactionResponse(BaseModel):
     """Full transaction response including fraud scoring results.
 
@@ -178,20 +203,24 @@ class TransactionResponse(BaseModel):
 
     # Step 44: server-generated transaction identifier
     transaction_id: str
+    id: str | None = None
 
     amount: float
     currency: str
-    merchant_name: str
-    merchant_category: str
+    merchant_name: str = "N/A"
+    merchant_category: str = "N/A"
     transaction_type: str
-    location_country: str
-    location_city: str
-    device_fingerprint: str
-    device_type: str
-    ip_address: str
+    location_country: str = "Unknown"
+    location_city: str = "Unknown"
+    device_fingerprint: str = "Unknown"
+    device_type: str = "desktop"
+    ip_address: str = "0.0.0.0"
 
     # Server-derived customer identity (Step 41)
     customer_id: str | None = None
+
+    # Status
+    status: str = "COMPLETED"
 
     # Fraud scoring results from ML service
     ml_score: int | None = None
@@ -205,7 +234,7 @@ class TransactionResponse(BaseModel):
     model_version: str | None = None
     fraud_probability: float | None = None
     fraud_prediction: int | None = None
-    timestamp: int | None = None
+    timestamp: int | str | None = None
 
     # Alert reference (populated when decision == HOLD)
     alert: AlertSummary | None = None

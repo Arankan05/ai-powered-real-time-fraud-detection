@@ -3,25 +3,17 @@
 Persists every customer transaction together with its fraud-decision
 result into the ``transactions`` table defined by the authoritative
 Alembic schema (``database/alembic/versions/20260830-4e7709c2bfad-initial_schema.py``).
-
-The legacy Step-40 persistence layer (users / alerts) predates the Alembic
-migration and never had a transactions table — submitted transactions were
-only written to the audit trail.  This repository closes that gap with a
-single atomic INSERT executed after the ML decision is available, so the
-row is written once with its final risk fields (the psycopg equivalent of
-the create-then-update flow in ``backend/app/repositories/transaction``).
-
-``model_version`` carries a foreign key to ``model_metadata.model_version``;
-:meth:`PostgresTransactionRepository.ensure_model_metadata` keeps that FK
-target satisfiable for the active model (idempotent upsert, called once at
-application startup).
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Protocol, runtime_checkable
 
+from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
@@ -39,30 +31,80 @@ _MODEL_FRAMEWORK = "xgboost"
 _MODEL_DIR = "ml/models"
 
 
+@runtime_checkable
+class TransactionRepository(Protocol):
+    """Abstract contract for transaction persistence."""
+
+    def create(self, **kwargs: Any) -> dict[str, Any]:
+        """Insert a transaction row with its fraud-decision result."""
+        ...
+
+    def get_by_id(self, transaction_id: str) -> dict[str, Any] | None:
+        """Return a single transaction by ID, or None."""
+        ...
+
+    def list_transactions(
+        self,
+        *,
+        customer_id: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        from_date: str | datetime | None = None,
+        to_date: str | datetime | None = None,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return (transactions, total_count) with optional filtering."""
+        ...
+
+    def ensure_model_metadata(
+        self, *, model_name: str, model_version: str
+    ) -> None:
+        """Ensure model metadata exists."""
+        ...
+
+
 class PostgresTransactionRepository:
     """PostgreSQL-backed transaction persistence (Alembic schema)."""
 
     def __init__(self, pool: ConnectionPool) -> None:
         self._pool = pool
 
+    def _row_to_dict(self, row: dict[str, Any]) -> dict[str, Any]:
+        res = dict(row)
+        if res.get("id"):
+            res["id"] = str(res["id"])
+            res["transaction_id"] = res["id"]
+        if res.get("customer_id"):
+            res["customer_id"] = str(res["customer_id"])
+        if res.get("merchant_id"):
+            res["merchant_id"] = str(res["merchant_id"])
+        if res.get("amount") is not None:
+            res["amount"] = float(res["amount"])
+        if isinstance(res.get("timestamp"), datetime):
+            res["timestamp"] = res["timestamp"].isoformat()
+        if isinstance(res.get("created_at"), datetime):
+            res["created_at"] = res["created_at"].isoformat()
+        if not res.get("merchant_name"):
+            res["merchant_name"] = "N/A"
+        if not res.get("merchant_category"):
+            res["merchant_category"] = "N/A"
+        if res.get("explanation_json") is not None:
+            expl = res["explanation_json"]
+            if isinstance(expl, str):
+                try:
+                    expl = json.loads(expl)
+                except Exception:
+                    pass
+            res["explanation"] = expl
+        return res
+
     def create(self, **kwargs: Any) -> dict[str, Any]:
-        """Insert a transaction row with its fraud-decision result.
+        """Insert a transaction row with its fraud-decision result."""
+        merchant_name = kwargs.get("merchant_name")
+        merchant_category = kwargs.get("merchant_category")
+        merchant_id = None
 
-        Expected keyword arguments (all supplied by the transaction
-        router): ``transaction_id``, ``customer_id``, ``amount``,
-        ``currency``, ``transaction_type``, ``location_country``,
-        ``location_city``, ``device_fingerprint``, ``device_type``,
-        ``ip_address``, ``ml_score``, ``behaviour_score``, ``rule_score``,
-        ``risk_score``, ``risk_level``, ``decision``,
-        ``explanation_json``, ``model_version``, ``status``.
-
-        ``timestamp`` / ``created_at`` are left to the column server
-        defaults (``now()``), matching the SQLAlchemy repository
-        convention.
-
-        Raises whatever psycopg raises (FK / CHECK violations, pool
-        exhaustion) — persistence failures are hard errors, never silent.
-        """
         row = {
             "id": _coerce_uuid(kwargs.get("transaction_id")),
             "customer_id": _coerce_uuid(kwargs.get("customer_id")),
@@ -94,7 +136,21 @@ class PostgresTransactionRepository:
             )
 
         with self._pool.connection() as conn:
-            with conn.cursor() as cur:
+            with conn.cursor(row_factory=dict_row) as cur:
+                if merchant_name:
+                    cur.execute("SELECT id FROM merchants WHERE name = %s", (merchant_name,))
+                    m_row = cur.fetchone()
+                    if m_row:
+                        merchant_id = m_row["id"]
+                    else:
+                        m_uuid = uuid.uuid4()
+                        cur.execute(
+                            "INSERT INTO merchants (id, name, category_code) VALUES (%s, %s, %s)",
+                            (m_uuid, merchant_name, merchant_category),
+                        )
+                        merchant_id = m_uuid
+                row["merchant_id"] = merchant_id
+
                 cur.execute(
                     """\
                     INSERT INTO transactions (
@@ -118,18 +174,87 @@ class PostgresTransactionRepository:
                 )
         return {"id": str(kwargs["transaction_id"])}
 
+    def get_by_id(self, transaction_id: str) -> dict[str, Any] | None:
+        tid = _coerce_uuid(transaction_id)
+        if tid is None:
+            return None
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT t.*, m.name as merchant_name, m.category_code as merchant_category
+                    FROM transactions t
+                    LEFT JOIN merchants m ON t.merchant_id = m.id
+                    WHERE t.id = %s
+                    """,
+                    (tid,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_dict(row)
+
+    def list_transactions(
+        self,
+        *,
+        customer_id: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        from_date: str | datetime | None = None,
+        to_date: str | datetime | None = None,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if customer_id:
+            cid = _coerce_uuid(customer_id)
+            if cid:
+                clauses.append("t.customer_id = %s")
+                params.append(cid)
+            else:
+                return [], 0
+        if status:
+            clauses.append("t.status = %s")
+            params.append(status)
+        if risk_level:
+            clauses.append("t.risk_level = %s")
+            params.append(risk_level)
+        if from_date:
+            clauses.append("t.timestamp >= %s")
+            params.append(from_date)
+        if to_date:
+            clauses.append("t.timestamp <= %s")
+            params.append(to_date)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self._pool.connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(f"SELECT COUNT(*) FROM transactions t {where}", params)
+                total_row = cur.fetchone()
+                total = int(total_row["count"] if isinstance(total_row, dict) else total_row[0])
+
+                offset = (page - 1) * per_page
+                cur.execute(
+                    f"""
+                    SELECT t.*, m.name as merchant_name, m.category_code as merchant_category
+                    FROM transactions t
+                    LEFT JOIN merchants m ON t.merchant_id = m.id
+                    {where}
+                    ORDER BY t.timestamp DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    [*params, per_page, offset],
+                )
+                rows = cur.fetchall()
+
+        return [self._row_to_dict(r) for r in rows], total
+
     def ensure_model_metadata(
         self, *, model_name: str, model_version: str
     ) -> None:
-        """Ensure a ``model_metadata`` row exists for the active model.
-
-        ``transactions.model_version`` references
-        ``model_metadata.model_version`` (Alembic initial schema); the
-        table is the registry of deployed models and is otherwise
-        populated by the deployment / promotion flow.  This idempotent
-        upsert keeps the FK satisfiable for the model the ML service
-        actually reports as active.
-        """
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -147,3 +272,76 @@ class PostgresTransactionRepository:
                         "path": f"{_MODEL_DIR}/{model_version}",
                     },
                 )
+
+
+class InMemoryTransactionStore:
+    """In-memory store for fallback/tests/SQLite mode."""
+
+    def __init__(self) -> None:
+        self._txns: dict[str, dict[str, Any]] = {}
+
+    def create(self, **kwargs: Any) -> dict[str, Any]:
+        tid = str(kwargs.get("transaction_id") or uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        expl = kwargs.get("explanation_json")
+        row = {
+            "id": tid,
+            "transaction_id": tid,
+            "customer_id": str(kwargs.get("customer_id")) if kwargs.get("customer_id") else None,
+            "merchant_id": None,
+            "merchant_name": kwargs.get("merchant_name") or "N/A",
+            "merchant_category": kwargs.get("merchant_category") or "N/A",
+            "amount": float(kwargs.get("amount", 0)),
+            "currency": kwargs.get("currency", "USD"),
+            "transaction_type": kwargs.get("transaction_type", "purchase"),
+            "location_country": kwargs.get("location_country", "Unknown"),
+            "location_city": kwargs.get("location_city", "Unknown"),
+            "device_fingerprint": kwargs.get("device_fingerprint", "Unknown"),
+            "device_type": kwargs.get("device_type", "desktop"),
+            "ip_address": kwargs.get("ip_address", "0.0.0.0"),
+            "status": kwargs.get("status") or "COMPLETED",
+            "risk_score": kwargs.get("risk_score"),
+            "risk_level": kwargs.get("risk_level"),
+            "decision": kwargs.get("decision"),
+            "ml_score": kwargs.get("ml_score"),
+            "behaviour_score": kwargs.get("behaviour_score"),
+            "rule_score": kwargs.get("rule_score"),
+            "explanation_json": expl,
+            "explanation": expl,
+            "model_version": kwargs.get("model_version"),
+            "timestamp": now,
+            "created_at": now,
+        }
+        self._txns[tid] = row
+        return {"id": tid}
+
+    def get_by_id(self, transaction_id: str) -> dict[str, Any] | None:
+        return self._txns.get(str(transaction_id))
+
+    def list_transactions(
+        self,
+        *,
+        customer_id: str | None = None,
+        status: str | None = None,
+        risk_level: str | None = None,
+        from_date: Any = None,
+        to_date: Any = None,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        filtered = list(self._txns.values())
+        if customer_id is not None:
+            filtered = [t for t in filtered if t.get("customer_id") == str(customer_id)]
+        if status is not None:
+            filtered = [t for t in filtered if t.get("status") == status]
+        if risk_level is not None:
+            filtered = [t for t in filtered if t.get("risk_level") == risk_level]
+
+        filtered.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        total = len(filtered)
+        start = (page - 1) * per_page
+        end = start + per_page
+        return filtered[start:end], total
+
+    def ensure_model_metadata(self, *, model_name: str, model_version: str) -> None:
+        pass

@@ -34,6 +34,8 @@ from backend.schemas import (
     OutcomeResponse,
     OutcomeUpdate,
     TransactionCreate,
+    TransactionListItem,
+    TransactionListResponse,
     TransactionResponse,
 )
 from backend.security.deps import get_current_user, require_roles
@@ -304,6 +306,8 @@ async def create_transaction(
             _transaction_repo.create(
                 transaction_id=transaction_id,
                 customer_id=customer_id,
+                merchant_name=request.merchant_name,
+                merchant_category=request.merchant_category,
                 amount=request.amount,
                 currency=request.currency,
                 transaction_type=request.transaction_type,
@@ -528,6 +532,164 @@ def _maybe_create_alert(
     except Exception:
         logger.warning("Failed to create alert", exc_info=True)
         return None
+
+
+# ── Collection & Single Resource Endpoints ─────────────────────────────
+
+
+@router.get(
+    "/transactions",
+    response_model=TransactionListResponse,
+)
+async def list_transactions(
+    page: int = 1,
+    per_page: int = 20,
+    status: str | None = None,
+    risk_level: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    current_user: dict = Depends(_require_authenticated),
+) -> TransactionListResponse:
+    """List transactions with optional status/risk filters and pagination.
+
+    - Customers can ONLY view their own transactions.
+    - Analysts and admins can view transaction data across customers.
+    """
+    if _transaction_repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Transaction repository not configured.",
+        )
+
+    user_role = current_user.get("role")
+    customer_id_filter: str | None = None
+
+    if user_role == "customer":
+        customer_id_filter = current_user.get("customer_id")
+        if not customer_id_filter:
+            return TransactionListResponse(
+                items=[], total=0, page=page, per_page=per_page
+            )
+
+    per_page = min(max(1, per_page), 100)
+    page = max(1, page)
+
+    items_raw, total = _transaction_repo.list_transactions(
+        customer_id=customer_id_filter,
+        status=status,
+        risk_level=risk_level,
+        from_date=from_date,
+        to_date=to_date,
+        page=page,
+        per_page=per_page,
+    )
+
+    items = []
+    for item in items_raw:
+        items.append(
+            TransactionListItem(
+                id=str(item["id"]),
+                customer_id=str(item["customer_id"]) if item.get("customer_id") else None,
+                merchant_name=item.get("merchant_name") or "N/A",
+                amount=float(item["amount"]),
+                currency=item.get("currency") or "USD",
+                transaction_type=item.get("transaction_type") or "purchase",
+                timestamp=str(item.get("timestamp") or item.get("created_at") or ""),
+                status=item.get("status") or "COMPLETED",
+                risk_score=item.get("risk_score"),
+                risk_level=item.get("risk_level"),
+                decision=item.get("decision"),
+            )
+        )
+
+    return TransactionListResponse(
+        items=items,
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
+
+
+@router.get(
+    "/transactions/{transaction_id}",
+    response_model=TransactionResponse,
+)
+async def get_transaction(
+    transaction_id: str,
+    current_user: dict = Depends(_require_authenticated),
+) -> TransactionResponse:
+    """Get single transaction detail including full fraud scoring.
+
+    - Customers can ONLY view their own transaction.
+    - Analysts and admins can view any transaction.
+    """
+    if _transaction_repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Transaction repository not configured.",
+        )
+
+    txn = _transaction_repo.get_by_id(transaction_id)
+    if txn is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transaction not found.",
+        )
+
+    user_role = current_user.get("role")
+    if user_role == "customer":
+        user_customer_id = current_user.get("customer_id")
+        if not user_customer_id or str(txn.get("customer_id")) != str(user_customer_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Transaction not found.",
+            )
+
+    expl = txn.get("explanation") or txn.get("explanation_json")
+    explanation_model = None
+    if expl and isinstance(expl, dict):
+        try:
+            explanation_model = MLExplanation.model_validate(expl)
+        except Exception:
+            pass
+
+    alert_summary = None
+    if _alert_repo is not None:
+        alert = _alert_repo.get_by_transaction_id(transaction_id)
+        if alert is not None:
+            alert_summary = AlertSummary(
+                id=str(alert["id"]),
+                status=alert["status"],
+                created_at=str(alert["created_at"]),
+            )
+
+    return TransactionResponse(
+        transaction_id=str(txn["id"]),
+        id=str(txn["id"]),
+        amount=float(txn["amount"]),
+        currency=txn.get("currency") or "USD",
+        merchant_name=txn.get("merchant_name") or "N/A",
+        merchant_category=txn.get("merchant_category") or "N/A",
+        transaction_type=txn.get("transaction_type") or "purchase",
+        location_country=txn.get("location_country") or "Unknown",
+        location_city=txn.get("location_city") or "Unknown",
+        device_fingerprint=txn.get("device_fingerprint") or "Unknown",
+        device_type=txn.get("device_type") or "desktop",
+        ip_address=txn.get("ip_address") or "0.0.0.0",
+        customer_id=str(txn["customer_id"]) if txn.get("customer_id") else None,
+        status=txn.get("status") or "COMPLETED",
+        ml_score=txn.get("ml_score"),
+        behaviour_score=txn.get("behaviour_score"),
+        rule_score=txn.get("rule_score"),
+        risk_score=txn.get("risk_score"),
+        risk_level=txn.get("risk_level"),
+        decision=txn.get("decision"),
+        explanation=explanation_model,
+        risk_factors=txn.get("risk_factors") or [],
+        model_version=txn.get("model_version"),
+        timestamp=txn.get("timestamp"),
+        alert=alert_summary,
+    )
 
 
 # ── Outcome feedback endpoint ─────────────────────────────────────────
