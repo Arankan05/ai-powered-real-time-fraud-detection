@@ -79,7 +79,8 @@ export interface TransactionQueryParams {
 
 /** Single item in the transaction list response */
 export interface TransactionSummaryItem {
-  id: string
+  id?: string | null
+  transaction_id?: string | null
   customer_id: string
   merchant_name: string
   amount: number
@@ -104,9 +105,10 @@ export interface TransactionListResponse {
 
 /** POST /api/v1/transactions — response body (201) */
 export interface TransactionResponse {
-  id: string
-  customer_id: string
-  merchant_id: string
+  id?: string | null
+  transaction_id?: string | null
+  customer_id?: string | null
+  merchant_id?: string | null
   amount: number
   currency: string
   merchant_name: string
@@ -117,7 +119,7 @@ export interface TransactionResponse {
   device_fingerprint: string
   device_type: DeviceType
   ip_address: string
-  timestamp: string
+  timestamp: string | number
   status: TransactionStatus
   ml_score: number
   behaviour_score: number
@@ -128,5 +130,13 @@ export interface TransactionResponse {
   explanation: TransactionExplanation
   risk_factors: string[]
   model_version: string
-  alert: TransactionAlertSummary | null
+  alert?: TransactionAlertSummary | null
+}
+
+/** Helper function to get canonical transaction ID from API response or summary */
+export function getTransactionId(tx: {
+  transaction_id?: string | null
+  id?: string | null
+}): string {
+  return tx.transaction_id || tx.id || ''
 }

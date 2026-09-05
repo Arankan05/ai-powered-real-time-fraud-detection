@@ -203,101 +203,107 @@ function TransactionHistoryPage() {
                 </tr>
               </thead>
               <tbody className="divide-y">
-                {transactions.map((tx) => (
-                  <tr
-                    key={tx.id}
-                    className="transition-colors hover:bg-muted/30"
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
-                      {formatDate(tx.timestamp)}
-                    </td>
-                    <td className="px-4 py-3 font-medium">{tx.merchant_name}</td>
-                    <td className="px-4 py-3 capitalize text-muted-foreground">
-                      {tx.transaction_type}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums">
-                      {formatAmount(tx.amount, tx.currency)}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="text-sm">{tx.status}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${riskStyles[tx.risk_level] ?? ''}`}
-                      >
-                        {tx.risk_level}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${decisionStyles[tx.decision] ?? ''}`}
-                      >
-                        {tx.decision}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          navigate(`/customer/transactions/${tx.id}`)
-                        }
-                        className="text-sm font-medium text-primary underline-offset-2 hover:underline"
-                      >
-                        Details
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {transactions.map((tx) => {
+                  const txId = tx.transaction_id || tx.id || ''
+                  return (
+                    <tr
+                      key={txId}
+                      className="transition-colors hover:bg-muted/30"
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
+                        {formatDate(tx.timestamp)}
+                      </td>
+                      <td className="px-4 py-3 font-medium">{tx.merchant_name}</td>
+                      <td className="px-4 py-3 capitalize text-muted-foreground">
+                        {tx.transaction_type}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums">
+                        {formatAmount(tx.amount, tx.currency)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-sm">{tx.status}</span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${riskStyles[tx.risk_level] ?? ''}`}
+                        >
+                          {tx.risk_level}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${decisionStyles[tx.decision] ?? ''}`}
+                        >
+                          {tx.decision}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigate(`/customer/transactions/${txId}`)
+                          }
+                          className="text-sm font-medium text-primary underline-offset-2 hover:underline"
+                        >
+                          Details
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
 
           {/* Cards (mobile / tablet) */}
           <div className="space-y-3 md:hidden">
-            {transactions.map((tx) => (
-              <div
-                key={tx.id}
-                className="space-y-3 rounded-lg border p-4"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="font-medium">{tx.merchant_name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {formatDate(tx.timestamp)}
+            {transactions.map((tx) => {
+              const txId = tx.transaction_id || tx.id || ''
+              return (
+                <div
+                  key={txId}
+                  className="space-y-3 rounded-lg border p-4"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="font-medium">{tx.merchant_name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatDate(tx.timestamp)}
+                      </p>
+                    </div>
+                    <p className="whitespace-nowrap text-right font-medium tabular-nums">
+                      {formatAmount(tx.amount, tx.currency)}
                     </p>
                   </div>
-                  <p className="whitespace-nowrap text-right font-medium tabular-nums">
-                    {formatAmount(tx.amount, tx.currency)}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <span className="capitalize text-xs text-muted-foreground">
-                    {tx.transaction_type}
-                  </span>
-                  <span className="text-xs text-muted-foreground">&middot;</span>
-                  <span className="text-xs">{tx.status}</span>
-                  <span
-                    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${riskStyles[tx.risk_level] ?? ''}`}
+                  <div className="flex flex-wrap gap-2">
+                    <span className="capitalize text-xs text-muted-foreground">
+                      {tx.transaction_type}
+                    </span>
+                    <span className="text-xs text-muted-foreground">&middot;</span>
+                    <span className="text-xs">{tx.status}</span>
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${riskStyles[tx.risk_level] ?? ''}`}
+                    >
+                      {tx.risk_level}
+                    </span>
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${decisionStyles[tx.decision] ?? ''}`}
+                    >
+                      {tx.decision}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(`/customer/transactions/${txId}`)
+                    }
+                    className="text-sm font-medium text-primary underline-offset-2 hover:underline"
                   >
-                    {tx.risk_level}
-                  </span>
-                  <span
-                    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${decisionStyles[tx.decision] ?? ''}`}
-                  >
-                    {tx.decision}
-                  </span>
+                    View Details
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    navigate(`/customer/transactions/${tx.id}`)
-                  }
-                  className="text-sm font-medium text-primary underline-offset-2 hover:underline"
-                >
-                  View Details
-                </button>
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           {/* Pagination */}

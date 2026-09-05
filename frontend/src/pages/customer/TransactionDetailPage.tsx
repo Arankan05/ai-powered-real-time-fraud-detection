@@ -24,7 +24,8 @@ function TransactionDetailPage() {
   // Fetch full details when router state is missing or stale
   useEffect(() => {
     if (!id) return
-    if (transaction && transaction.id === id) return
+    const currentTxId = transaction?.transaction_id || transaction?.id
+    if (transaction && currentTxId === id) return
 
     let cancelled = false
     setIsLoading(true)

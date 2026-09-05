@@ -27,6 +27,7 @@ function DetailRow({ label, value }: DetailRowProps) {
 function TransactionInfo({ transaction }: TransactionInfoProps) {
   const {
     id,
+    transaction_id,
     amount,
     currency,
     transaction_type,
@@ -39,6 +40,7 @@ function TransactionInfo({ transaction }: TransactionInfoProps) {
     status,
   } = transaction
 
+  const displayId = transaction_id || id || ''
   const formattedDate = new Date(timestamp).toLocaleString()
   const location = location_city
     ? `${location_city}, ${location_country}`
@@ -50,7 +52,7 @@ function TransactionInfo({ transaction }: TransactionInfoProps) {
         <CardTitle>Transaction Details</CardTitle>
       </CardHeader>
       <CardContent className="divide-y">
-        <DetailRow label="Transaction ID" value={id} />
+        <DetailRow label="Transaction ID" value={displayId} />
         <DetailRow
           label="Amount"
           value={`${amount.toFixed(2)} ${currency}`}

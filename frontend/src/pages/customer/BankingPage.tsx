@@ -4,6 +4,7 @@ import { AxiosError } from 'axios'
 import TransactionForm from '@/components/customer/TransactionForm'
 import type { TransactionFormValues } from '@/components/customer/TransactionForm'
 import type { ApiError } from '@/types/auth'
+import { getTransactionId } from '@/types/transaction'
 import * as transactionApi from '@/services/api/transactionApi'
 
 function BankingPage() {
@@ -14,7 +15,8 @@ function BankingPage() {
     setErrorMsg(null)
     try {
       const result = await transactionApi.createTransaction(values)
-      navigate(`/customer/transactions/${result.id}`, { state: result })
+      const txId = getTransactionId(result)
+      navigate(`/customer/transactions/${txId}`, { state: result })
     } catch (err) {
       if (err instanceof AxiosError) {
         const data = err.response?.data as ApiError | undefined
