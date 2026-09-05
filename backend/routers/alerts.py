@@ -43,6 +43,9 @@ _alert_repo: AlertRepository | None = None
 # Step 45: audit repository — set at app startup
 _audit_repo = None
 
+# Transaction repository — set at app startup
+_transaction_repo = None
+
 
 def set_alert_repository(repo: AlertRepository) -> None:
     """Set the alert repository (called during app startup)."""
@@ -54,6 +57,12 @@ def set_audit_repository(repo: Any) -> None:
     """Set the audit repository (called during app startup)."""
     global _audit_repo
     _audit_repo = repo
+
+
+def set_transaction_repository(repo: Any) -> None:
+    """Set the transaction repository (called during app startup)."""
+    global _transaction_repo
+    _transaction_repo = repo
 
 
 def get_alert_repository() -> AlertRepository:
@@ -85,6 +94,27 @@ def _alert_dict_to_response(alert: dict[str, Any]) -> AlertResponse:
             transaction_type=alert.get("transaction_type"),
             timestamp=alert.get("timestamp"),
         )
+    elif alert.get("transaction_id") and _transaction_repo is not None:
+        try:
+            tx = _transaction_repo.get_by_id(str(alert["transaction_id"]))
+            if tx:
+                ts = tx.get("timestamp")
+                ts_int = ts if isinstance(ts, int) else None
+                txn_summary = TransactionSummary(
+                    amount=tx.get("amount"),
+                    currency=tx.get("currency"),
+                    merchant_name=tx.get("merchant_name"),
+                    transaction_type=tx.get("transaction_type"),
+                    timestamp=ts_int,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch transaction summary for alert %s (transaction_id=%s): %s",
+                alert.get("id"),
+                alert.get("transaction_id"),
+                exc,
+            )
+            txn_summary = None
 
     return AlertResponse(
         id=alert["id"],

@@ -1104,3 +1104,119 @@ class TestLiveEndToEnd:
                 assert r2.json()["resolved_at"] is not None
         finally:
             repo.close()
+
+
+class TestAlertTransactionSummaryLinking:
+    """Verifies TransactionSummary population from linked transactions."""
+
+    def test_alert_with_linked_transaction_populates_summary(self, auth_override):
+        from fastapi.testclient import TestClient
+        from backend.app import app
+        from backend.db.alert_repository import InMemoryAlertStore
+        from backend.db.transaction_repository import InMemoryTransactionStore
+        from backend.routers import alerts as alerts_module
+
+        alert_repo = InMemoryAlertStore()
+        txn_repo = InMemoryTransactionStore()
+
+        alerts_module.set_alert_repository(alert_repo)
+        alerts_module.set_transaction_repository(txn_repo)
+
+        tx_id = str(uuid.uuid4())
+        txn_repo.create(
+            transaction_id=tx_id,
+            customer_id=str(uuid.uuid4()),
+            amount=450.75,
+            currency="EUR",
+            merchant_name="SuperMart Berlin",
+            transaction_type="payment",
+            decision="HOLD",
+            status="COMPLETED",
+            risk_score=85,
+            risk_level="HIGH",
+        )
+
+        alert_id = str(uuid.uuid4())
+        # Alert stored without amount/merchant_name (11-column PostgreSQL style)
+        alert_repo.create(
+            id=alert_id,
+            transaction_id=tx_id,
+            customer_id=str(uuid.uuid4()),
+            risk_score=85,
+            risk_level="HIGH",
+            decision="HOLD",
+        )
+
+        tc = TestClient(app)
+        resp = tc.get(f"/api/v1/alerts/{alert_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["transaction_summary"] is not None
+        assert data["transaction_summary"]["amount"] == 450.75
+        assert data["transaction_summary"]["currency"] == "EUR"
+        assert data["transaction_summary"]["merchant_name"] == "SuperMart Berlin"
+        assert data["transaction_summary"]["transaction_type"] == "payment"
+
+    def test_legacy_alert_without_linked_transaction_remains_safe(self, auth_override):
+        from fastapi.testclient import TestClient
+        from backend.app import app
+        from backend.db.alert_repository import InMemoryAlertStore
+        from backend.db.transaction_repository import InMemoryTransactionStore
+        from backend.routers import alerts as alerts_module
+
+        alert_repo = InMemoryAlertStore()
+        txn_repo = InMemoryTransactionStore()
+
+        alerts_module.set_alert_repository(alert_repo)
+        alerts_module.set_transaction_repository(txn_repo)
+
+        alert_id = str(uuid.uuid4())
+        # Alert with non-existent transaction_id and no amount
+        alert_repo.create(
+            id=alert_id,
+            transaction_id=str(uuid.uuid4()),  # Not in txn_repo
+            customer_id=str(uuid.uuid4()),
+            risk_score=75,
+            risk_level="HIGH",
+            decision="HOLD",
+        )
+
+        tc = TestClient(app)
+        resp = tc.get(f"/api/v1/alerts/{alert_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["transaction_summary"] is None
+
+    def test_legacy_alert_with_direct_amount_preserves_behavior(self, auth_override):
+        from fastapi.testclient import TestClient
+        from backend.app import app
+        from backend.db.alert_repository import InMemoryAlertStore
+        from backend.routers import alerts as alerts_module
+
+        alert_repo = InMemoryAlertStore()
+        alerts_module.set_alert_repository(alert_repo)
+        alerts_module.set_transaction_repository(None)
+
+        alert_id = str(uuid.uuid4())
+        alert_repo.create(
+            id=alert_id,
+            transaction_id=str(uuid.uuid4()),
+            customer_id=str(uuid.uuid4()),
+            risk_score=90,
+            risk_level="HIGH",
+            decision="HOLD",
+            amount=999.99,
+            currency="USD",
+            merchant_name="Legacy Merchant",
+            transaction_type="transfer",
+        )
+
+        tc = TestClient(app)
+        resp = tc.get(f"/api/v1/alerts/{alert_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["transaction_summary"] is not None
+        assert data["transaction_summary"]["amount"] == 999.99
+        assert data["transaction_summary"]["currency"] == "USD"
+        assert data["transaction_summary"]["merchant_name"] == "Legacy Merchant"
+        assert data["transaction_summary"]["transaction_type"] == "transfer"

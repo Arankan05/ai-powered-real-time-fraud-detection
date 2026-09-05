@@ -42,6 +42,7 @@ from backend.routers.alerts import (
     router as alerts_router,
     set_alert_repository,
     set_audit_repository as set_alerts_audit_repo,
+    set_transaction_repository as set_alerts_txn_repo,
 )
 from backend.routers.analytics import (
     router as analytics_router,
@@ -105,6 +106,7 @@ def _init_sqlite() -> None:
     from backend.db.transaction_repository import InMemoryTransactionStore
     _transaction_repo = InMemoryTransactionStore()
     set_txn_transaction_repo(_transaction_repo)
+    set_alerts_txn_repo(_transaction_repo)
     logger.info("Transaction store: in-memory")
 
     # Step 44: idempotency store — in-memory for SQLite mode
@@ -172,6 +174,7 @@ def _init_postgres() -> None:
     from backend.db.transaction_repository import PostgresTransactionRepository
     _transaction_repo = PostgresTransactionRepository(_pg_pool)
     set_txn_transaction_repo(_transaction_repo)
+    set_alerts_txn_repo(_transaction_repo)
 
     # Step 44: idempotency store — PostgreSQL-backed
     from backend.db.idempotency_store import PostgresIdempotencyStore
