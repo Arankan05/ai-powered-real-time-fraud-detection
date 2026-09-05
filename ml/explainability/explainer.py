@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import shap
 
 from ml.predict.bundle import ModelBundle
 
@@ -51,8 +50,8 @@ _DEFAULT_TOP_N = 10
 class FraudExplainer:
     """SHAP-based explainer for the tuned XGBoost fraud model.
 
-    Wraps ``shap.TreeExplainer`` constructed from the already-trained
-    model inside a :class:`ModelBundle`.
+    Computes exact TreeSHAP feature attributions using native XGBoost C++
+    contributions (pred_contribs=True) with lazy fallback to the ``shap`` package.
 
     Args:
         bundle: A loaded ModelBundle containing the fitted XGBoost model.
@@ -60,10 +59,7 @@ class FraudExplainer:
 
     def __init__(self, bundle: ModelBundle) -> None:
         self._bundle = bundle
-        # TreeExplainer is exact for tree ensembles and does not need
-        # a background dataset when using the default
-        # ``feature_perturbation="tree_path_dependent"``.
-        self._explainer = shap.TreeExplainer(bundle.model)
+        self._explainer = None
 
     @property
     def model_version(self) -> str:
@@ -90,14 +86,35 @@ class FraudExplainer:
             List of dicts ``{"feature": str, "importance": float}``,
             sorted by descending ``|importance|``.
         """
-        shap_values = self._explainer.shap_values(X_transformed)
+        row_shap = None
 
-        # shap_values shape: (n_samples, n_features) for binary
-        # classification with XGBoost.  Take row 0 for single-row input.
-        if shap_values.ndim == 1:
-            row_shap = shap_values
-        else:
-            row_shap = shap_values[0]
+        # ── 1. Native XGBoost C++ TreeSHAP (fast, exact, low-memory) ────
+        try:
+            import xgboost as xgb
+
+            booster = self._bundle.model.get_booster()
+            dmat = xgb.DMatrix(X_transformed, feature_names=feature_names)
+            contribs = booster.predict(dmat, pred_contribs=True)
+            if contribs.ndim == 1:
+                row_shap = contribs[:-1]
+            else:
+                row_shap = contribs[0, :-1]
+        except Exception:
+            row_shap = None
+
+        # ── 2. Fallback to `shap` package if native computation fails ───
+        if row_shap is None:
+            try:
+                import shap
+
+                if self._explainer is None:
+                    self._explainer = shap.TreeExplainer(self._bundle.model)
+                shap_values = self._explainer.shap_values(X_transformed)
+                row_shap = shap_values if shap_values.ndim == 1 else shap_values[0]
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("SHAP explanation failed", exc_info=True)
+                return []
 
         # Build (feature, value, |value|) tuples and sort by |value| desc
         entries = [
