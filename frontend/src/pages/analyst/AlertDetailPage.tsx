@@ -31,18 +31,29 @@ const statusStyles: Record<string, string> = {
   DISMISSED: 'bg-gray-500/10 text-gray-600',
 }
 
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: 'short',
-    timeStyle: 'short',
-  })
+function formatDate(iso?: string | null): string {
+  if (!iso) return 'N/A'
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    })
+  } catch {
+    return iso
+  }
 }
 
-function formatAmount(amount: number, currency: string): string {
-  return new Intl.NumberFormat(undefined, {
-    style: 'currency',
-    currency,
-  }).format(amount)
+function formatAmount(amount?: number | null, currency?: string | null): string {
+  const val = amount ?? 0
+  const curr = currency || 'USD'
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: curr,
+    }).format(val)
+  } catch {
+    return `${curr} ${val.toFixed(2)}`
+  }
 }
 
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
@@ -218,7 +229,7 @@ function AlertDetailPage() {
               <CardTitle>Risk Factors</CardTitle>
             </CardHeader>
             <CardContent>
-              {alert.risk_factors.length > 0 ? (
+              {alert.risk_factors && alert.risk_factors.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {alert.risk_factors.map((factor) => (
                     <span
@@ -243,34 +254,50 @@ function AlertDetailPage() {
               <CardTitle>Transaction Information</CardTitle>
             </CardHeader>
             <CardContent>
-              <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <DetailRow label="Transaction ID">
-                  <span className="font-mono text-xs">{alert.transaction.id}</span>
-                </DetailRow>
-                <DetailRow label="Customer ID">
-                  <span className="font-mono text-xs">{alert.transaction.customer_id}</span>
-                </DetailRow>
-                <DetailRow label="Merchant">
-                  {alert.transaction.merchant_name}
-                </DetailRow>
-                <DetailRow label="Amount">
-                  <span className="tabular-nums">
-                    {formatAmount(alert.transaction.amount, alert.transaction.currency)}
-                  </span>
-                </DetailRow>
-                <DetailRow label="Type">
-                  <span className="capitalize">{alert.transaction.transaction_type}</span>
-                </DetailRow>
-                <DetailRow label="Location">
-                  {alert.transaction.location_city}, {alert.transaction.location_country}
-                </DetailRow>
-                <DetailRow label="Device Type">
-                  <span className="capitalize">{alert.transaction.device_type}</span>
-                </DetailRow>
-                <DetailRow label="Timestamp">
-                  {formatDate(alert.transaction.timestamp)}
-                </DetailRow>
-              </dl>
+              {alert.transaction ? (
+                <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <DetailRow label="Transaction ID">
+                    <span className="font-mono text-xs">{alert.transaction.id}</span>
+                  </DetailRow>
+                  <DetailRow label="Customer ID">
+                    <span className="font-mono text-xs">{alert.transaction.customer_id}</span>
+                  </DetailRow>
+                  <DetailRow label="Merchant">
+                    {alert.transaction.merchant_name}
+                  </DetailRow>
+                  <DetailRow label="Amount">
+                    <span className="tabular-nums">
+                      {formatAmount(alert.transaction.amount, alert.transaction.currency)}
+                    </span>
+                  </DetailRow>
+                  <DetailRow label="Type">
+                    <span className="capitalize">{alert.transaction.transaction_type}</span>
+                  </DetailRow>
+                  <DetailRow label="Location">
+                    {alert.transaction.location_city}, {alert.transaction.location_country}
+                  </DetailRow>
+                  <DetailRow label="Device Type">
+                    <span className="capitalize">{alert.transaction.device_type}</span>
+                  </DetailRow>
+                  <DetailRow label="Timestamp">
+                    {formatDate(alert.transaction.timestamp)}
+                  </DetailRow>
+                </dl>
+              ) : (
+                <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <DetailRow label="Transaction ID">
+                    <span className="font-mono text-xs">{alert.transaction_id}</span>
+                  </DetailRow>
+                  <DetailRow label="Merchant">
+                    {alert.transaction_summary?.merchant_name ?? 'N/A'}
+                  </DetailRow>
+                  <DetailRow label="Amount">
+                    <span className="tabular-nums">
+                      {formatAmount(alert.transaction_summary?.amount, alert.transaction_summary?.currency)}
+                    </span>
+                  </DetailRow>
+                </dl>
+              )}
             </CardContent>
           </Card>
 
@@ -283,17 +310,17 @@ function AlertDetailPage() {
               <dl className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <DetailRow label="ML Score">
                   <span className="text-2xl font-semibold tabular-nums">
-                    {alert.transaction.ml_score}
+                    {alert.transaction?.ml_score ?? 'N/A'}
                   </span>
                 </DetailRow>
                 <DetailRow label="Behaviour Score">
                   <span className="text-2xl font-semibold tabular-nums">
-                    {alert.transaction.behaviour_score}
+                    {alert.transaction?.behaviour_score ?? 'N/A'}
                   </span>
                 </DetailRow>
                 <DetailRow label="Rule Score">
                   <span className="text-2xl font-semibold tabular-nums">
-                    {alert.transaction.rule_score}
+                    {alert.transaction?.rule_score ?? 'N/A'}
                   </span>
                 </DetailRow>
               </dl>

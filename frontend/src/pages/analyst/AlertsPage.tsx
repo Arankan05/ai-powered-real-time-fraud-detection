@@ -30,17 +30,40 @@ const statusStyles: Record<string, string> = {
 }
 
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: 'short',
-    timeStyle: 'short',
-  })
+  if (!iso) return 'N/A'
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    })
+  } catch {
+    return iso
+  }
 }
 
-function formatAmount(amount: number, currency: string): string {
-  return new Intl.NumberFormat(undefined, {
-    style: 'currency',
-    currency,
-  }).format(amount)
+function formatAmount(amount?: number | null, currency?: string | null): string {
+  const val = amount ?? 0
+  const curr = currency || 'USD'
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: curr,
+    }).format(val)
+  } catch {
+    return `${curr} ${val.toFixed(2)}`
+  }
+}
+
+function getMerchantName(alert: AlertSummaryItem): string {
+  return alert.transaction_summary?.merchant_name ?? alert.merchant_name ?? 'N/A'
+}
+
+function getAmount(alert: AlertSummaryItem): number {
+  return alert.transaction_summary?.amount ?? alert.amount ?? 0
+}
+
+function getCurrency(alert: AlertSummaryItem): string {
+  return alert.transaction_summary?.currency ?? alert.currency ?? 'USD'
 }
 
 function AlertsPage() {
@@ -237,13 +260,10 @@ function AlertsPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3 font-medium">
-                      {alert.transaction_summary.merchant_name}
+                      {getMerchantName(alert)}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums">
-                      {formatAmount(
-                        alert.transaction_summary.amount,
-                        alert.transaction_summary.currency,
-                      )}
+                      {formatAmount(getAmount(alert), getCurrency(alert))}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">
                       {formatDate(alert.created_at)}
@@ -273,17 +293,14 @@ function AlertsPage() {
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <p className="font-medium">
-                      {alert.transaction_summary.merchant_name}
+                      {getMerchantName(alert)}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       {formatDate(alert.created_at)}
                     </p>
                   </div>
                   <p className="whitespace-nowrap text-right font-medium tabular-nums">
-                    {formatAmount(
-                      alert.transaction_summary.amount,
-                      alert.transaction_summary.currency,
-                    )}
+                    {formatAmount(getAmount(alert), getCurrency(alert))}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">

@@ -7,11 +7,13 @@ import {
 } from '@/components/ui/card'
 
 interface FraudExplanationProps {
-  explanation: TransactionExplanation
+  explanation?: TransactionExplanation | null
 }
 
 function FraudExplanation({ explanation }: FraudExplanationProps) {
-  const { ml_top_factors, behaviour_signals, rules_triggered } = explanation
+  const ml_top_factors = explanation?.ml_top_factors ?? []
+  const behaviour_signals = explanation?.behaviour_signals ?? []
+  const rules_triggered = explanation?.rules_triggered ?? []
   const hasML = ml_top_factors.length > 0
   const hasBehaviour = behaviour_signals.length > 0
   const hasRules = rules_triggered.length > 0

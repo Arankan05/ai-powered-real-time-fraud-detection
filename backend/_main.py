@@ -43,6 +43,12 @@ from backend.routers.alerts import (
     set_alert_repository,
     set_audit_repository as set_alerts_audit_repo,
 )
+from backend.routers.analytics import (
+    router as analytics_router,
+    set_alert_repository as set_analytics_alert_repo,
+    set_postgres_pool as set_analytics_pool,
+    set_transaction_repository as set_analytics_txn_repo,
+)
 from backend.routers.audit import (
     router as audit_router,
     set_audit_repository as set_audit_router_repo,
@@ -122,6 +128,10 @@ def _init_sqlite() -> None:
     set_governance_repository(_governance_store)
     logger.info("Promotion governance: in-memory")
 
+    set_analytics_txn_repo(_transaction_repo)
+    if _alert_repo:
+        set_analytics_alert_repo(_alert_repo)
+
 
 def _init_postgres() -> None:
     """Set up the PostgreSQL-backed repositories (fail-fast).
@@ -180,6 +190,10 @@ def _init_postgres() -> None:
     from backend.db.promotion_governance import PostgresPromotionGovernanceRepository
     _governance_repo_pg = PostgresPromotionGovernanceRepository(_pg_pool)
     set_governance_repository(_governance_repo_pg)
+
+    set_analytics_pool(_pg_pool)
+    set_analytics_txn_repo(_transaction_repo)
+    set_analytics_alert_repo(_alert_repo)
 
     logger.info(
         "Persistence: PostgreSQL (host=%s port=%s db=%s)",
@@ -264,7 +278,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5175",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -273,5 +290,6 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(transactions_router)
 app.include_router(alerts_router)
+app.include_router(analytics_router)
 app.include_router(audit_router)
 app.include_router(promotions_router)

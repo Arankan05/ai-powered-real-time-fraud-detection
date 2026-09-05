@@ -9,6 +9,7 @@ Schemas follow ``docs/api-contract.md`` and ``docs/ml-architecture.md``.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -492,3 +493,44 @@ class ActivationConsumeRequest(BaseModel):
         ..., min_length=1, max_length=2000,
         description="Short-lived activation token from verification",
     )
+
+
+# ── Analytics Dashboard (Step 52) ────────────────────────────────────
+
+
+class RiskFactorCount(BaseModel):
+    """Single entry in top_risk_factors."""
+
+    factor: str
+    count: int
+
+
+class TransactionsDay(BaseModel):
+    """Single day entry in transactions_over_time."""
+
+    date: str
+    total: int
+    flagged: int
+
+
+class RiskDistribution(BaseModel):
+    """Breakdown of transactions by risk level."""
+
+    LOW: int = 0
+    MEDIUM: int = 0
+    HIGH: int = 0
+
+
+class DashboardResponse(BaseModel):
+    """GET /api/v1/analytics/dashboard response."""
+
+    from_date: datetime
+    to_date: datetime
+    total_transactions: int
+    flagged_transactions: int
+    alerts_open: int
+    alerts_resolved: int
+    risk_distribution: RiskDistribution
+    top_risk_factors: list[RiskFactorCount] = []
+    transactions_over_time: list[TransactionsDay] = []
+

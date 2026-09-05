@@ -253,6 +253,7 @@ def create_pool(
         "user": user,
         "password": password,
         "connect_timeout": max(int(timeout), 1),
+        "prepare_threshold": None,
     }
     if ssl_mode:
         conn_kwargs["sslmode"] = ssl_mode
@@ -265,6 +266,7 @@ def create_pool(
         ) from None
 
     kwargs = dict(pool_kwargs or {})
+    kwargs.setdefault("kwargs", {})["prepare_threshold"] = None
     try:
         pool = ConnectionPool(
             conninfo=conninfo,

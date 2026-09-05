@@ -27,7 +27,10 @@ export interface AlertSummaryItem {
   notes: string | null
   created_at: string
   resolved_at: string | null
-  transaction_summary: AlertTransactionSummary
+  merchant_name?: string | null
+  amount?: number | null
+  currency?: string | null
+  transaction_summary?: AlertTransactionSummary | null
 }
 
 /** Paginated response from GET /api/v1/alerts */
@@ -72,14 +75,15 @@ export interface AlertDetail {
   risk_score: number
   risk_level: RiskLevel
   decision: Decision
-  explanation: TransactionExplanation
-  risk_factors: string[]
+  explanation?: TransactionExplanation | null
+  risk_factors?: string[] | null
   status: AlertStatus
   analyst_id: string | null
   notes: string | null
   created_at: string
   resolved_at: string | null
-  transaction: AlertTransaction
+  transaction?: AlertTransaction | null
+  transaction_summary?: AlertTransactionSummary | null
 }
 
 // ── Mutation types ──────────────────────────────────────────────────
