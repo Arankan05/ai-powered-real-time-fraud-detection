@@ -269,6 +269,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     pass
 
 
+def _get_allowed_cors_origins() -> list[str]:
+    origins = [
+        o.strip()
+        for o in (settings.BACKEND_CORS_ORIGINS or "").split(",")
+        if o.strip()
+    ]
+    for dev in ("http://localhost:5173", "http://localhost:5175"):
+        if dev not in origins:
+            origins.append(dev)
+    return origins
+
+
 app = FastAPI(
     title="Fraud Detection API",
     description="Backend for the AI-Powered Fraud Detection System.",
@@ -278,10 +290,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5175",
-    ],
+    allow_origins=_get_allowed_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
